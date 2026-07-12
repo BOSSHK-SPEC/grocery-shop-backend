@@ -11,9 +11,9 @@ export const getOrders = async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Business not found' } });
     }
 
-    // Seed dummy orders if database is empty
+    // Seed dummy orders if database is empty (only for test business)
     let count = await Order.count({ where: { businessId: business.id } });
-    if (count === 0) {
+    if (count === 0 && business.businessCode === 'BUS-DEFAULT') {
       const dummyOrders = [
         {
           customerName: "Rahul Sharma",

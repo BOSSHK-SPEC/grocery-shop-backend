@@ -272,10 +272,21 @@ export const getBusinessAnalytics = async (req, res, next) => {
 
     const totalOrdersCount = bills.length + orders.length;
 
-    // 2. Distinct visitors/customers based on mobile numbers
+    // 2. Distinct visitors/customers based on mobile numbers or customer names
     const customersSet = new Set();
-    bills.forEach(b => { if (b.mobile && b.mobile !== 'None') customersSet.add(b.mobile); });
-    const uniqueCustomers = Math.max(customersSet.size, Math.round(totalOrdersCount * 0.8) + 3);
+    bills.forEach(b => {
+      if (b.mobile && b.mobile !== 'None') {
+        customersSet.add(b.mobile);
+      } else if (b.customerName) {
+        customersSet.add(b.customerName);
+      }
+    });
+    orders.forEach(o => {
+      if (o.customerName) {
+        customersSet.add(o.customerName);
+      }
+    });
+    const uniqueCustomers = customersSet.size;
 
     // 3. Profit Margin estimation (22% net profit)
     const netRevenue = totalSales * 0.22;
