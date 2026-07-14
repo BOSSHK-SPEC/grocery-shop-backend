@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { Op } from 'sequelize';
-import { Business, Bill } from '../../models/index.js';
+import { Business, Bill, Product, sequelize } from '../../models/index.js';
 import { resolveBusiness } from '../../utils/helpers.js';
 
 export const getBills = async (req, res, next) => {
@@ -74,10 +74,12 @@ export const getBills = async (req, res, next) => {
 };
 
 export const createBill = async (req, res, next) => {
+  const transaction = await sequelize.transaction();
   try {
     const { businessId } = req.params;
     const business = await resolveBusiness(businessId);
     if (!business) {
+      await transaction.rollback();
       return res.status(404).json({ error: { message: 'Business not found' } });
     }
     const schema = z.object({
@@ -89,6 +91,7 @@ export const createBill = async (req, res, next) => {
     const data = schema.parse(req.body);
     const billCode = `BILL-${Math.floor(100000 + Math.random() * 900000)}`;
     const date = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    
     const newBill = await Bill.create({
       businessId: business.id,
       billCode,
@@ -97,9 +100,43 @@ export const createBill = async (req, res, next) => {
       amount: data.amount,
       date,
       rows: data.rows
-    });
+    }, { transaction });
+
+     // Deduct quantities
+     for (const row of data.rows) {
+       const qty = parseFloat(row.qty) || 0;
+       console.log(`[Deduction] Row details - productId: ${row.productId}, item: ${row.item}, qty: ${qty}`);
+       if (qty <= 0) continue;
+ 
+       let product;
+       if (row.productId) {
+         product = await Product.findOne({
+           where: { id: row.productId, businessId: business.id },
+           transaction
+         });
+       }
+       
+       if (!product && row.item) {
+         product = await Product.findOne({
+           where: { productName: row.item, businessId: business.id },
+           transaction
+         });
+       }
+ 
+       if (product) {
+         const oldQty = product.totalQuantity;
+         const newQty = Math.max(0, oldQty - qty);
+         console.log(`[Deduction] Found product ${product.productName} (ID: ${product.id}). Old Qty: ${oldQty}, Deducting: ${qty}, New Qty: ${newQty}`);
+         await product.update({ totalQuantity: newQty }, { transaction });
+       } else {
+         console.log(`[Deduction] Product NOT found in catalog!`);
+       }
+     }
+
+    await transaction.commit();
     return res.status(201).json(newBill);
   } catch (error) {
+    await transaction.rollback();
     next(error);
   }
 };
@@ -124,14 +161,20 @@ export const getBillById = async (req, res, next) => {
 };
 
 export const updateBill = async (req, res, next) => {
+  const transaction = await sequelize.transaction();
   try {
     const { businessId, billId } = req.params;
     const business = await resolveBusiness(businessId);
     if (!business) {
+      await transaction.rollback();
       return res.status(404).json({ error: { message: 'Business not found' } });
     }
-    const bill = await Bill.findOne({ where: { id: billId, businessId: business.id } });
+    const bill = await Bill.findOne({ 
+      where: { id: billId, businessId: business.id },
+      transaction
+    });
     if (!bill) {
+      await transaction.rollback();
       return res.status(404).json({ error: { message: 'Bill not found' } });
     }
     const schema = z.object({
@@ -141,32 +184,122 @@ export const updateBill = async (req, res, next) => {
       rows: z.array(z.any()).optional()
     });
     const data = schema.parse(req.body);
+
+    if (data.rows) {
+      // 1. Revert old bill items
+      const oldRows = bill.rows || [];
+      for (const row of oldRows) {
+        const qty = parseFloat(row.qty) || 0;
+        if (qty <= 0) continue;
+
+        let product;
+        if (row.productId) {
+          product = await Product.findOne({
+            where: { id: row.productId, businessId: business.id },
+            transaction
+          });
+        }
+        if (!product && row.item) {
+          product = await Product.findOne({
+            where: { productName: row.item, businessId: business.id },
+            transaction
+          });
+        }
+
+        if (product) {
+          await product.update({ totalQuantity: product.totalQuantity + qty }, { transaction });
+        }
+      }
+
+      // 2. Deduct new bill items
+      for (const row of data.rows) {
+        const qty = parseFloat(row.qty) || 0;
+        if (qty <= 0) continue;
+
+        let product;
+        if (row.productId) {
+          product = await Product.findOne({
+            where: { id: row.productId, businessId: business.id },
+            transaction
+          });
+        }
+        if (!product && row.item) {
+          product = await Product.findOne({
+            where: { productName: row.item, businessId: business.id },
+            transaction
+          });
+        }
+
+        if (product) {
+          const newQty = Math.max(0, product.totalQuantity - qty);
+          await product.update({ totalQuantity: newQty }, { transaction });
+        }
+      }
+    }
+
     await bill.update({
       ...(data.customerName && { customerName: data.customerName }),
       ...(data.mobile !== undefined && { mobile: data.mobile }),
       ...(data.amount !== undefined && { amount: data.amount }),
       ...(data.rows && { rows: data.rows }),
-    });
+    }, { transaction });
+
+    await transaction.commit();
     return res.status(200).json(bill);
   } catch (error) {
+    await transaction.rollback();
     next(error);
   }
 };
 
 export const deleteBill = async (req, res, next) => {
+  const transaction = await sequelize.transaction();
   try {
     const { businessId, billId } = req.params;
     const business = await resolveBusiness(businessId);
     if (!business) {
+      await transaction.rollback();
       return res.status(404).json({ error: { message: 'Business not found' } });
     }
-    const bill = await Bill.findOne({ where: { id: billId, businessId: business.id } });
+    const bill = await Bill.findOne({ 
+      where: { id: billId, businessId: business.id },
+      transaction
+    });
     if (!bill) {
+      await transaction.rollback();
       return res.status(404).json({ error: { message: 'Bill not found' } });
     }
-    await bill.destroy();
+
+    // Revert old bill items
+    const oldRows = bill.rows || [];
+    for (const row of oldRows) {
+      const qty = parseFloat(row.qty) || 0;
+      if (qty <= 0) continue;
+
+      let product;
+      if (row.productId) {
+        product = await Product.findOne({
+          where: { id: row.productId, businessId: business.id },
+          transaction
+        });
+      }
+      if (!product && row.item) {
+        product = await Product.findOne({
+          where: { productName: row.item, businessId: business.id },
+          transaction
+        });
+      }
+
+      if (product) {
+        await product.update({ totalQuantity: product.totalQuantity + qty }, { transaction });
+      }
+    }
+
+    await bill.destroy({ transaction });
+    await transaction.commit();
     return res.status(200).json({ message: 'Bill deleted successfully' });
   } catch (error) {
+    await transaction.rollback();
     next(error);
   }
 };

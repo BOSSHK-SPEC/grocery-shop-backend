@@ -93,7 +93,7 @@ app.use('/', apiRouter);
 // Error Handling Middleware
 app.use((err, req, res, next) => {
   console.error('Unhandled Error:', err);
-  
+
   // Handle JSON parsing or Zod validation errors nicely
   if (err.name === 'ZodError') {
     return res.status(400).json({

@@ -41,10 +41,24 @@ export const User = sequelize.define('User', {
     allowNull: false,
     defaultValue: 'ONBOARDING_PROGRESS'
   },
+  role: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: 'consumer'
+  },
   misc: {
     type: DataTypes.JSON,
     allowNull: true,
     defaultValue: { businessId: [] }
+  },
+  profilePic: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  deviceToken: {
+    // FCM registration token for push notifications (nullable until registered).
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   timestamps: true

@@ -5,12 +5,14 @@ import {
   createProfile,
   getBusinessProfile,
   updateBusinessProfile,
-  getBusinessAnalytics
+  getBusinessAnalytics,
+  getAllBusinesses
 } from './businessController.js';
 
 export const businessRouter = Router();
 
 businessRouter.get('/business/getAllBusinessType', authGuard, getAllBusinessType);
+businessRouter.get('/business', authGuard, getAllBusinesses);
 businessRouter.post('/business/createProfile', authGuard, createProfile);
 businessRouter.get('/business/:businessId/profile', authGuard, getBusinessProfile);
 businessRouter.put('/business/:businessId/profile', authGuard, updateBusinessProfile);

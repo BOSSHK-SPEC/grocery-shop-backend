@@ -11,6 +11,10 @@ export const Order = sequelize.define('Order', {
     type: DataTypes.UUID,
     allowNull: false
   },
+  customerId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
   orderCode: {
     type: DataTypes.STRING,
     allowNull: false,
@@ -25,9 +29,17 @@ export const Order = sequelize.define('Order', {
     allowNull: false
   },
   status: {
-    type: DataTypes.ENUM('Pending', 'Packed', 'Shipped', 'Delivered'),
+    // Canonical values are validated in code via orderStatus.js (state machine).
+    // Stored as STRING (not ENUM) so the lifecycle can evolve without fragile
+    // MySQL ENUM migrations.
+    type: DataTypes.STRING,
     defaultValue: 'Pending',
     allowNull: false
+  },
+  statusHistory: {
+    // Audit trail: [{ status, by: 'merchant'|'customer', at: ISOString }]
+    type: DataTypes.JSON,
+    allowNull: true
   },
   date: {
     type: DataTypes.STRING,

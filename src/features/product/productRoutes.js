@@ -5,11 +5,13 @@ import {
   getAllProducts,
   createProduct,
   updateProduct,
-  deleteProduct
+  deleteProduct,
+  getProductsAcrossBusinesses
 } from './productController.js';
 
 export const productRouter = Router();
 
+productRouter.get('/product', authGuard, getProductsAcrossBusinesses);
 productRouter.get('/product/:businessId/productCategory', authGuard, getProductCategories);
 productRouter.get('/product/:businessId/allProduct', authGuard, getAllProducts);
 productRouter.post('/product/:businessId', authGuard, createProduct);

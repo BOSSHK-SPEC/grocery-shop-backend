@@ -1,7 +1,15 @@
 import { z } from 'zod';
 import { Op } from 'sequelize';
-import { Business, Order } from '../../models/index.js';
+import { Business, Order, Address } from '../../models/index.js';
 import { resolveBusiness } from '../../utils/helpers.js';
+import { sendToUser } from '../../utils/notify.js';
+import {
+  ALL_STATUSES,
+  OrderStatus,
+  normalizeStatus,
+  canTransition,
+  labelFor,
+} from './orderStatus.js';
 
 export const getOrders = async (req, res, next) => {
   try {
@@ -112,8 +120,15 @@ export const getOrders = async (req, res, next) => {
 
     const totalPages = Math.ceil(totalItems / parsedLimit);
 
+    const normalizedOrders = orders.map((o) => {
+      const j = o.toJSON();
+      j.status = normalizeStatus(j.status);
+      j.statusHistory = j.statusHistory || [];
+      return j;
+    });
+
     return res.status(200).json({
-      orders,
+      orders: normalizedOrders,
       metadata: {
         totalItems,
         totalPages,
@@ -143,14 +158,59 @@ export const createOrder = async (req, res, next) => {
     const date = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
     const newOrder = await Order.create({
       businessId: business.id,
+      customerId: req.user ? req.user.id : null,
       orderCode,
       customerName: data.customerName,
       amount: data.amount,
-      status: 'Pending',
+      status: OrderStatus.PENDING,
+      statusHistory: [{ status: OrderStatus.PENDING, by: 'customer', at: new Date().toISOString() }],
       date,
       items: data.items
     });
-    return res.status(201).json(newOrder);
+
+    // Notify the store owner of the new incoming order (no-op if FCM off).
+    if (business.ownerId) {
+      sendToUser(
+        business.ownerId,
+        `New order ${orderCode}`,
+        `${data.customerName} placed an order worth ₹${data.amount}.`,
+        { type: 'new_order', orderId: newOrder.id }
+      );
+    }
+
+    return res.status(201).json(orderToJson(newOrder));
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getConsumerOrders = async (req, res, next) => {
+  try {
+    const list = await Order.findAll({
+      where: { customerId: req.user.id },
+      order: [['createdAt', 'DESC']],
+      include: [
+        {
+          model: Business,
+          attributes: ['id', 'businessName', 'businessCode', 'businessDp'],
+          include: [{ model: Address, as: 'address' }]
+        }
+      ]
+    });
+
+    const enriched = list.map((o) => {
+      const j = o.toJSON();
+      j.status = normalizeStatus(j.status);
+      j.statusHistory = j.statusHistory || [];
+      j.storeName = j.Business?.businessName ?? null;
+      j.storeCode = j.Business?.businessCode ?? null;
+      j.storeImage = j.Business?.businessDp ?? null;
+      j.storeAddress = j.Business?.address ?? null;
+      delete j.Business;
+      return j;
+    });
+
+    return res.status(200).json(enriched);
   } catch (error) {
     next(error);
   }
@@ -160,17 +220,122 @@ export const updateOrderStatus = async (req, res, next) => {
   try {
     const { orderId } = req.params;
     const schema = z.object({
-      status: z.enum(['Pending', 'Packed', 'Shipped', 'Delivered'])
+      status: z.enum(ALL_STATUSES)
     });
     const { status } = schema.parse(req.body);
+
     const order = await Order.findByPk(orderId);
     if (!order) {
       return res.status(404).json({ error: { message: 'Order not found' } });
     }
+
+    // Authorization: only the merchant who owns the order's business may update it.
+    const business = await Business.findByPk(order.businessId);
+    if (!business || business.ownerId !== req.user.id) {
+      return res.status(403).json({ error: { message: 'You are not allowed to update this order.' } });
+    }
+
+    // Validate the transition against the canonical state machine.
+    const current = normalizeStatus(order.status);
+    if (current === status) {
+      // Idempotent: already in the requested state.
+      return res.status(200).json(orderToJson(order));
+    }
+    if (!canTransition(current, status)) {
+      return res.status(409).json({
+        error: { message: `Cannot move an order from ${labelFor(current)} to ${labelFor(status)}.` }
+      });
+    }
+
+    const history = Array.isArray(order.statusHistory) ? order.statusHistory : [];
+    history.push({ status, by: 'merchant', at: new Date().toISOString() });
+
     order.status = status;
+    order.statusHistory = history;
     await order.save();
-    return res.status(200).json(order);
+
+    // Notify the customer of the status change (no-op if FCM not configured).
+    if (order.customerId) {
+      sendToUser(
+        order.customerId,
+        `Order ${order.orderCode} — ${labelFor(status)}`,
+        statusMessageForCustomer(status, business.businessName),
+        { type: 'order_status', orderId: order.id, status }
+      );
+    }
+
+    return res.status(200).json(orderToJson(order));
   } catch (error) {
     next(error);
   }
 };
+
+export const cancelOrder = async (req, res, next) => {
+  try {
+    const { orderId } = req.params;
+    const order = await Order.findByPk(orderId);
+    if (!order) {
+      return res.status(404).json({ error: { message: 'Order not found' } });
+    }
+
+    // Authorization: only the customer who placed the order may cancel it.
+    if (!order.customerId || order.customerId !== req.user.id) {
+      return res.status(403).json({ error: { message: 'You are not allowed to cancel this order.' } });
+    }
+
+    const current = normalizeStatus(order.status);
+    if (current !== OrderStatus.PENDING) {
+      return res.status(409).json({
+        error: { message: 'This order can no longer be cancelled. The store has already started processing it.' }
+      });
+    }
+
+    const history = Array.isArray(order.statusHistory) ? order.statusHistory : [];
+    history.push({ status: OrderStatus.CANCELLED, by: 'customer', at: new Date().toISOString() });
+
+    order.status = OrderStatus.CANCELLED;
+    order.statusHistory = history;
+    await order.save();
+
+    // Notify the store owner that the customer cancelled.
+    const business = await Business.findByPk(order.businessId);
+    if (business?.ownerId) {
+      sendToUser(
+        business.ownerId,
+        `Order ${order.orderCode} cancelled`,
+        `${order.customerName} cancelled their order.`,
+        { type: 'order_cancelled', orderId: order.id }
+      );
+    }
+
+    return res.status(200).json(orderToJson(order));
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function orderToJson(order) {
+  const j = order.toJSON();
+  j.status = normalizeStatus(j.status);
+  j.statusHistory = j.statusHistory || [];
+  return j;
+}
+
+function statusMessageForCustomer(status, storeName) {
+  const store = storeName || 'The store';
+  switch (status) {
+    case OrderStatus.PACKING:
+      return `${store} has started packing your order.`;
+    case OrderStatus.PACKED:
+      return `${store} has packed your order.`;
+    case OrderStatus.OUT_FOR_DELIVERY:
+      return 'Your order is out for delivery.';
+    case OrderStatus.DELIVERED:
+      return 'Your order has been delivered. Enjoy!';
+    case OrderStatus.CANCELLED:
+      return 'Your order has been cancelled.';
+    default:
+      return `Your order status is now ${labelFor(status)}.`;
+  }
+}

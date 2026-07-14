@@ -9,7 +9,11 @@ export const Address = sequelize.define('Address', {
   },
   businessId: {
     type: DataTypes.UUID,
-    allowNull: false
+    allowNull: true
+  },
+  userId: {
+    type: DataTypes.UUID,
+    allowNull: true
   },
   line1: {
     type: DataTypes.STRING,

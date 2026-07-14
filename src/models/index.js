@@ -19,13 +19,21 @@ Business.belongsTo(User, { foreignKey: 'ownerId', as: 'owner' });
 Business.hasOne(Address, { foreignKey: 'businessId', as: 'address', onDelete: 'CASCADE' });
 Address.belongsTo(Business, { foreignKey: 'businessId' });
 
+// User - Address (One to One)
+User.hasOne(Address, { foreignKey: 'userId', as: 'address', onDelete: 'CASCADE' });
+Address.belongsTo(User, { foreignKey: 'userId' });
+
 // Business - Product (One to Many)
 Business.hasMany(Product, { foreignKey: 'businessId', as: 'products', onDelete: 'CASCADE' });
-Product.belongsTo(Business, { foreignKey: 'businessId' });
+Product.belongsTo(Business, { foreignKey: 'businessId', as: 'business' });
 
 // Business - Order (One to Many)
 Business.hasMany(Order, { foreignKey: 'businessId', as: 'orders', onDelete: 'CASCADE' });
 Order.belongsTo(Business, { foreignKey: 'businessId' });
+
+// User - Order (One to Many)
+User.hasMany(Order, { foreignKey: 'customerId', as: 'orders' });
+Order.belongsTo(User, { foreignKey: 'customerId', as: 'customer' });
 
 // Business - Bill (One to Many)
 Business.hasMany(Bill, { foreignKey: 'businessId', as: 'bills', onDelete: 'CASCADE' });

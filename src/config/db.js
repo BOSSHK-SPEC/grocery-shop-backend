@@ -11,7 +11,9 @@ const sequelize = new Sequelize(
     host: process.env.DB_HOST || '127.0.0.1',
     port: process.env.DB_PORT || 3306,
     dialect: 'mysql',
-    logging: process.env.NODE_ENV === 'development' ? console.log : false,
+    // Sequelize SQL query logging is disabled — keep the console to API logs
+    // (morgan) only. Set SEQUELIZE_LOGGING=true to re-enable for debugging.
+    logging: process.env.SEQUELIZE_LOGGING === 'true' ? console.log : false,
     pool: {
       max: 10,
       min: 0,

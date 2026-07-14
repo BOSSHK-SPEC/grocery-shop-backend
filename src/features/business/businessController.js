@@ -9,7 +9,7 @@ import {
   Bill,
   Order
 } from '../../models/index.js';
-import { resolveBusiness } from '../../utils/helpers.js';
+import { resolveBusiness, saveBase64Image } from '../../utils/helpers.js';
 
 export const getAllBusinessType = async (req, res, next) => {
   try {
@@ -40,6 +40,7 @@ export const createProfile = async (req, res, next) => {
       businessTypeId: z.array(z.string()),
       deliveryRange: z.union([z.number(), z.string()]).transform(val => parseInt(val) || 0),
       gstNumber: z.string().optional().nullable(),
+      businessDp: z.string().optional().nullable(),
       address: addressSchema
     });
 
@@ -62,12 +63,14 @@ export const createProfile = async (req, res, next) => {
 
     for (const bData of businesses) {
       const businessCode = `BUS-${Math.floor(100000 + Math.random() * 900000)}`;
+      const businessDp = bData.businessDp ? await saveBase64Image(bData.businessDp) : null;
       const business = await Business.create({
         ownerId: user.id,
         businessName: bData.businessName,
         businessCode,
         deliveryRange: bData.deliveryRange,
-        gstNumber: bData.gstNumber
+        gstNumber: bData.gstNumber,
+        businessDp
       });
 
       // Save Address
@@ -105,7 +108,7 @@ export const createProfile = async (req, res, next) => {
         deliveryRange: business.deliveryRange,
         gstNumber: business.gstNumber,
         address: address.toJSON(),
-        businessDp: null,
+        businessDp: business.businessDp,
         businessType: dbBusinessTypes.map(bt => ({ id: bt.id, businessType: bt.businessType })),
         currentSelection: null
       });
@@ -165,6 +168,7 @@ export const updateBusinessProfile = async (req, res, next) => {
       businessName: z.string().optional(),
       deliveryRange: z.number().optional(),
       gstNumber: z.string().optional().nullable(),
+      businessDp: z.string().optional().nullable(),
       shopName: z.string().optional(),
       floor: z.string().optional().nullable(),
       locality: z.string().optional(),
@@ -180,6 +184,10 @@ export const updateBusinessProfile = async (req, res, next) => {
     if (data.businessName) businessUpdate.businessName = data.businessName;
     if (data.deliveryRange !== undefined) businessUpdate.deliveryRange = data.deliveryRange;
     if (data.gstNumber !== undefined) businessUpdate.gstNumber = data.gstNumber;
+    if (data.businessDp !== undefined && data.businessDp !== null) {
+      // Persist the store image: decodes base64 (or passes through existing /uploads path)
+      businessUpdate.businessDp = await saveBase64Image(data.businessDp);
+    }
     if (Object.keys(businessUpdate).length > 0) await business.update(businessUpdate);
 
     // Update Owner (User) record
@@ -350,6 +358,21 @@ export const getBusinessAnalytics = async (req, res, next) => {
       pieData,
       dailySales
     });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getAllBusinesses = async (req, res, next) => {
+  try {
+    const list = await Business.findAll({
+      include: [
+        { model: Address, as: 'address' },
+        { model: User, as: 'owner', attributes: ['firstName', 'lastName', 'email', 'mobileNumber'] },
+        { model: BusinessType, as: 'businessType' }
+      ]
+    });
+    return res.status(200).json(list);
   } catch (error) {
     next(error);
   }

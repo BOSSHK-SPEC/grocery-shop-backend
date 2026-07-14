@@ -164,3 +164,25 @@ export const deleteProduct = async (req, res, next) => {
     next(error);
   }
 };
+
+export const getProductsAcrossBusinesses = async (req, res, next) => {
+  try {
+    const { category, search } = req.query;
+    const where = {};
+    if (category) {
+      where.category = category;
+    }
+    if (search) {
+      where.productName = { [Op.like]: `%${search}%` };
+    }
+    const products = await Product.findAll({
+      where,
+      include: [
+        { model: Business, as: 'business', attributes: ['businessName', 'id'] }
+      ]
+    });
+    return res.status(200).json(products);
+  } catch (error) {
+    next(error);
+  }
+};
