@@ -8,6 +8,8 @@ import { ProductCategory } from './ProductCategory.js';
 import { Product } from './Product.js';
 import { Order } from './Order.js';
 import { Bill } from './Bill.js';
+import { Notification } from './Notification.js';
+import { ChatMessage } from './ChatMessage.js';
 
 // Setup Relationships
 
@@ -44,6 +46,18 @@ const BusinessBusinessType = sequelize.define('BusinessBusinessType', {}, { time
 Business.belongsToMany(BusinessType, { through: BusinessBusinessType, foreignKey: 'businessId', as: 'businessType' });
 BusinessType.belongsToMany(Business, { through: BusinessBusinessType, foreignKey: 'businessTypeId' });
 
+// User - Notification (One to Many)
+User.hasMany(Notification, { foreignKey: 'userId', as: 'notifications', onDelete: 'CASCADE' });
+Notification.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
+// User - Order (Delivery Partner relationship)
+User.hasMany(Order, { foreignKey: 'deliveryPartnerId', as: 'deliveries' });
+Order.belongsTo(User, { foreignKey: 'deliveryPartnerId', as: 'deliveryPartner' });
+
+// Order - ChatMessage (One to Many)
+Order.hasMany(ChatMessage, { foreignKey: 'orderId', as: 'chatMessages', onDelete: 'CASCADE' });
+ChatMessage.belongsTo(Order, { foreignKey: 'orderId' });
+
 export {
   sequelize,
   User,
@@ -55,5 +69,7 @@ export {
   Product,
   Order,
   Bill,
+  Notification,
+  ChatMessage,
   BusinessBusinessType
 };

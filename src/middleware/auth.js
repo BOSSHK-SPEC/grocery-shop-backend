@@ -17,6 +17,7 @@ export const authGuard = async (req, res, next) => {
     }
 
     req.user = user;
+    req.userRole = decoded.role;
     next();
   } catch (error) {
     console.error('Auth Guard Error:', error.message);

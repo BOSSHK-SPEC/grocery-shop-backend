@@ -59,6 +59,14 @@ export const User = sequelize.define('User', {
     // FCM registration token for push notifications (nullable until registered).
     type: DataTypes.STRING,
     allowNull: true
+  },
+  latitude: {
+    type: DataTypes.DOUBLE,
+    allowNull: true
+  },
+  longitude: {
+    type: DataTypes.DOUBLE,
+    allowNull: true
   }
 }, {
   timestamps: true

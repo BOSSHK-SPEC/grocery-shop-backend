@@ -87,7 +87,7 @@ export const login = async (req, res, next) => {
       mobile: z.string(),
       otpId: z.string(),
       otp: z.string(),
-      role: z.enum(['merchant', 'consumer']).optional()
+      role: z.enum(['merchant', 'consumer', 'delivery']).optional()
     });
     const { mobile, otpId, otp, role: selectedRole } = schema.parse(req.body);
 
@@ -228,11 +228,88 @@ export const getConsumerProfile = async (req, res, next) => {
     const address = await Address.findOne({ where: { userId: user.id } });
     return res.status(200).json({
       owner: {
+        id: user.id,
         firstName: user.firstName,
         lastName: user.lastName,
         mobileNumber: user.mobileNumber,
         profilePic: user.profilePic,
-        email: user.email
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        misc: user.misc
+      },
+      address
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/** Onboards a delivery partner profile with bike and driving license. */
+export const onboardDelivery = async (req, res, next) => {
+  try {
+    const addressSchema = z.object({
+      line1: z.string(),
+      line2: z.string().optional().nullable(),
+      locality: z.string(),
+      landmark: z.string().optional().nullable(),
+      district: z.string().optional().nullable(),
+      state: z.string().optional().nullable(),
+      country: z.string().optional().nullable(),
+      pinCode: z.union([z.number(), z.string()]).transform(val => parseInt(val) || 0),
+      latitude: z.union([z.number(), z.string()]).optional().nullable().transform(val => val ? parseFloat(val) : null),
+      longitude: z.union([z.number(), z.string()]).optional().nullable().transform(val => val ? parseFloat(val) : null)
+    });
+
+    const schema = z.object({
+      firstName: z.string(),
+      lastName: z.string(),
+      bikeRegNumber: z.string(),
+      dlPic: z.string().optional().nullable(),
+      address: addressSchema
+    });
+
+    const { firstName, lastName, bikeRegNumber, dlPic, address: addressData } = schema.parse(req.body);
+    const user = req.user;
+
+    user.firstName = firstName;
+    user.lastName = lastName;
+    user.status = 'ACTIVE';
+
+    let dlPicUrl = null;
+    if (dlPic) {
+      dlPicUrl = await saveBase64Image(dlPic);
+    }
+
+    user.misc = {
+      ...user.misc,
+      bikeRegNumber,
+      dlPic: dlPicUrl || user.misc?.dlPic || ''
+    };
+
+    await user.save();
+
+    let address = await Address.findOne({ where: { userId: user.id } });
+    if (address) {
+      await address.update(addressData);
+    } else {
+      address = await Address.create({
+        userId: user.id,
+        ...addressData
+      });
+    }
+
+    return res.status(200).json({
+      message: 'Delivery partner profile onboarded successfully',
+      user: {
+        id: user.id,
+        mobileNumber: user.mobileNumber,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        profilePic: user.profilePic,
+        role: user.role,
+        status: user.status,
+        misc: user.misc
       },
       address
     });

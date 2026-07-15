@@ -11,7 +11,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { User } from '../models/index.js';
+import { User, Notification } from '../models/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -58,6 +58,21 @@ export async function sendToUser(userId, title, body, data = {}) {
       console.warn('[notify] skipped: no userId (order has no customerId?)');
       return;
     }
+
+    // Save notification to DB history
+    try {
+      await Notification.create({
+        userId,
+        title,
+        body,
+        data: data || {},
+        read: false
+      });
+      console.log(`[notify] saved notification to DB for user ${userId}: "${title}"`);
+    } catch (dbError) {
+      console.error('[notify] DB save failure:', dbError.message);
+    }
+
     const msg = await ensureInit();
     if (!msg) {
       console.warn('[notify] skipped: FCM not initialized (service account / firebase-admin missing).');

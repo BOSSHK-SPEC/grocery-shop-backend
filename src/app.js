@@ -5,6 +5,8 @@ import morgan from 'morgan';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import http from 'http';
+import { initWebSocket } from './utils/websocket.js';
 
 // Load config
 dotenv.config();
@@ -113,7 +115,10 @@ app.use((err, req, res, next) => {
 });
 
 // Start Server
-app.listen(PORT, '0.0.0.0', () => {
+const server = http.createServer(app);
+initWebSocket(server);
+
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Grocery Backend listening at http://localhost:${PORT}`);
 });
 

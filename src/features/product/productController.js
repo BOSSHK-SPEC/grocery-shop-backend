@@ -41,7 +41,8 @@ export const createProduct = async (req, res, next) => {
       productThumbnail: z.array(z.string()),
       totalQuantity: z.union([z.number(), z.string()]).transform(val => parseFloat(val) || 0),
       totalQuantityUnit: z.string(),
-      brandName: z.string().optional().nullable()
+      brandName: z.string().optional().nullable(),
+      inventoryCount: z.union([z.number(), z.string()]).transform(val => parseInt(val) || 0).optional()
     });
 
     const { businessId } = req.params;
@@ -74,7 +75,8 @@ export const createProduct = async (req, res, next) => {
       pricePerQuantityUnit: validatedData.pricePerQuantityUnit,
       category: validatedData.category,
       totalQuantity: validatedData.totalQuantity,
-      totalQuantityUnit: validatedData.totalQuantityUnit
+      totalQuantityUnit: validatedData.totalQuantityUnit,
+      inventoryCount: validatedData.inventoryCount || 0
     });
 
     return res.status(202).json('success');
@@ -107,7 +109,8 @@ export const updateProduct = async (req, res, next) => {
       brandName: z.string().optional().nullable(),
       category: z.string().optional(),
       totalQuantity: z.union([z.number(), z.string()]).transform(val => parseFloat(val)).optional(),
-      totalQuantityUnit: z.string().optional()
+      totalQuantityUnit: z.string().optional(),
+      inventoryCount: z.union([z.number(), z.string()]).transform(val => parseInt(val)).optional()
     });
     const validatedData = schema.parse(req.body);
 
@@ -116,11 +119,9 @@ export const updateProduct = async (req, res, next) => {
     if (validatedData.productThumbnail) {
       savedThumbnails = [];
       for (const base64 of validatedData.productThumbnail) {
-        if (base64.startsWith('data:image')) {
-          const urlPath = await saveBase64Image(base64);
+        const urlPath = await saveBase64Image(base64);
+        if (urlPath) {
           savedThumbnails.push(urlPath);
-        } else {
-          savedThumbnails.push(base64);
         }
       }
     }
@@ -134,7 +135,8 @@ export const updateProduct = async (req, res, next) => {
       pricePerQuantityUnit: validatedData.pricePerQuantityUnit !== undefined ? validatedData.pricePerQuantityUnit : product.pricePerQuantityUnit,
       category: validatedData.category !== undefined ? validatedData.category : product.category,
       totalQuantity: validatedData.totalQuantity !== undefined ? validatedData.totalQuantity : product.totalQuantity,
-      totalQuantityUnit: validatedData.totalQuantityUnit !== undefined ? validatedData.totalQuantityUnit : product.totalQuantityUnit
+      totalQuantityUnit: validatedData.totalQuantityUnit !== undefined ? validatedData.totalQuantityUnit : product.totalQuantityUnit,
+      inventoryCount: validatedData.inventoryCount !== undefined ? validatedData.inventoryCount : product.inventoryCount
     });
 
     return res.status(200).json(product);

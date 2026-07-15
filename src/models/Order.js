@@ -48,6 +48,10 @@ export const Order = sequelize.define('Order', {
   items: {
     type: DataTypes.JSON,
     allowNull: false
+  },
+  deliveryPartnerId: {
+    type: DataTypes.UUID,
+    allowNull: true
   }
 }, {
   timestamps: true

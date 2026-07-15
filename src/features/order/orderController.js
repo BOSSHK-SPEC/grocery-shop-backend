@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import { Op } from 'sequelize';
-import { Business, Order, Address } from '../../models/index.js';
+import { Business, Order, Product, Address, User } from '../../models/index.js';
 import { resolveBusiness } from '../../utils/helpers.js';
 import { sendToUser } from '../../utils/notify.js';
+import { notifyMerchant } from '../../utils/websocket.js';
 import {
   ALL_STATUSES,
   OrderStatus,
@@ -154,6 +155,30 @@ export const createOrder = async (req, res, next) => {
       items: z.array(z.any())
     });
     const data = schema.parse(req.body);
+
+    // Verify stock levels first
+    for (const item of data.items) {
+      if (item.productId) {
+        const prod = await Product.findByPk(item.productId);
+        if (prod) {
+          if (prod.inventoryCount < item.qty) {
+            return res.status(400).json({ error: { message: `Insufficient stock for ${prod.productName} (only ${prod.inventoryCount} left)` } });
+          }
+        }
+      }
+    }
+
+    // Decrement stock for all items
+    for (const item of data.items) {
+      if (item.productId) {
+        const prod = await Product.findByPk(item.productId);
+        if (prod) {
+          prod.inventoryCount -= item.qty;
+          await prod.save();
+        }
+      }
+    }
+
     const orderCode = `ORD-${Math.floor(100000 + Math.random() * 900000)}`;
     const date = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
     const newOrder = await Order.create({
@@ -178,6 +203,12 @@ export const createOrder = async (req, res, next) => {
       );
     }
 
+    // Notify merchant via WebSocket
+    notifyMerchant(business.businessCode, {
+      type: 'new_order',
+      order: orderToJson(newOrder)
+    });
+
     return res.status(201).json(orderToJson(newOrder));
   } catch (error) {
     next(error);
@@ -194,6 +225,12 @@ export const getConsumerOrders = async (req, res, next) => {
           model: Business,
           attributes: ['id', 'businessName', 'businessCode', 'businessDp'],
           include: [{ model: Address, as: 'address' }]
+        },
+        {
+          model: User,
+          as: 'customer',
+          attributes: ['id', 'firstName', 'lastName'],
+          include: [{ model: Address, as: 'address' }]
         }
       ]
     });
@@ -206,7 +243,9 @@ export const getConsumerOrders = async (req, res, next) => {
       j.storeCode = j.Business?.businessCode ?? null;
       j.storeImage = j.Business?.businessDp ?? null;
       j.storeAddress = j.Business?.address ?? null;
+      j.customerAddress = j.customer?.address ?? null;
       delete j.Business;
+      delete j.customer;
       return j;
     });
 

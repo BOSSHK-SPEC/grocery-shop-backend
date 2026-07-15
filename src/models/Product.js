@@ -51,6 +51,11 @@ export const Product = sequelize.define('Product', {
   totalQuantityUnit: {
     type: DataTypes.STRING,
     allowNull: false
+  },
+  inventoryCount: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0
   }
 }, {
   timestamps: true
