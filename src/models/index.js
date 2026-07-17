@@ -10,8 +10,17 @@ import { Order } from './Order.js';
 import { Bill } from './Bill.js';
 import { Notification } from './Notification.js';
 import { ChatMessage } from './ChatMessage.js';
+import { Tenant } from './Tenant.js';
 
 // Setup Relationships
+
+// Tenant - User (One to Many)
+Tenant.hasMany(User, { foreignKey: 'tenantId', as: 'users' });
+User.belongsTo(Tenant, { foreignKey: 'tenantId', as: 'tenant' });
+
+// Tenant - Business (One to Many)
+Tenant.hasMany(Business, { foreignKey: 'tenantId', as: 'businesses' });
+Business.belongsTo(Tenant, { foreignKey: 'tenantId', as: 'tenant' });
 
 // User - Business (One to Many)
 User.hasMany(Business, { foreignKey: 'ownerId', as: 'businesses' });
@@ -71,5 +80,6 @@ export {
   Bill,
   Notification,
   ChatMessage,
-  BusinessBusinessType
+  BusinessBusinessType,
+  Tenant
 };

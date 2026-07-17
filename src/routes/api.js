@@ -6,6 +6,8 @@ import { billingRouter } from '../features/billing/billingRoutes.js';
 import { productRouter } from '../features/product/productRoutes.js';
 import { notificationRouter } from '../features/notification/notificationRoutes.js';
 import { deliveryRouter } from '../features/delivery/deliveryRoutes.js';
+import adminRouter from '../features/admin/adminRoutes.js';
+import superAdminRouter from '../features/superAdmin/superAdminRoutes.js';
 
 export const apiRouter = Router();
 
@@ -16,4 +18,6 @@ apiRouter.use(billingRouter);
 apiRouter.use(productRouter);
 apiRouter.use(notificationRouter);
 apiRouter.use('/delivery', deliveryRouter);
+apiRouter.use(adminRouter);
+apiRouter.use(superAdminRouter);
 
