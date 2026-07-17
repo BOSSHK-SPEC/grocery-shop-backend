@@ -7,7 +7,8 @@ import {
   BusinessType,
   BusinessBusinessType,
   Bill,
-  Order
+  Order,
+  Tenant
 } from '../../models/index.js';
 import { resolveBusiness, saveBase64Image } from '../../utils/helpers.js';
 
@@ -47,16 +48,33 @@ export const createProfile = async (req, res, next) => {
     const schema = z.object({
       firstName: z.string(),
       lastName: z.string(),
+      tenantId: z.string().optional().nullable(),
       businesses: z.array(businessSchema)
     });
 
-    const { firstName, lastName, businesses } = schema.parse(req.body);
+    const { firstName, lastName, tenantId, businesses } = schema.parse(req.body);
     const user = req.user;
 
     // Update user profile info
     user.firstName = firstName;
     user.lastName = lastName;
-    user.status = 'ACTIVE';
+    user.status = 'PENDING_APPROVAL';
+    user.role = 'merchant'; // Always registered as merchant initially so they appear in approvals list
+
+    let finalTenantId = tenantId;
+    if (!tenantId || tenantId === 'standalone') {
+      // Standalone Shop onboarding
+      const tenantCode = `TEN-${businesses[0].businessName.substring(0, 3).toUpperCase().replace(/[^A-Z]/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
+      const newTenant = await Tenant.create({
+        name: businesses[0].businessName,
+        code: tenantCode,
+        status: 'ACTIVE'
+      });
+      finalTenantId = newTenant.id;
+    }
+
+    user.tenantId = finalTenantId;
+    await user.save();
 
     const createdBusinesses = [];
     const businessIds = [...(user.misc?.businessId || [])];
@@ -66,6 +84,7 @@ export const createProfile = async (req, res, next) => {
       const businessDp = bData.businessDp ? await saveBase64Image(bData.businessDp) : null;
       const business = await Business.create({
         ownerId: user.id,
+        tenantId: finalTenantId,
         businessName: bData.businessName,
         businessCode,
         deliveryRange: bData.deliveryRange,

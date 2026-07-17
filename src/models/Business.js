@@ -11,6 +11,10 @@ export const Business = sequelize.define('Business', {
     type: DataTypes.UUID,
     allowNull: false
   },
+  tenantId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
   businessName: {
     type: DataTypes.STRING,
     allowNull: false

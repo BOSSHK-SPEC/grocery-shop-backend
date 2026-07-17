@@ -24,3 +24,17 @@ export const authGuard = async (req, res, next) => {
     return res.status(401).json({ error: { message: 'Invalid or expired token.' } });
   }
 };
+
+export const adminGuard = (req, res, next) => {
+  if (req.user && (req.userRole === 'admin' || req.user.role === 'admin' || req.userRole === 'super_admin' || req.user.role === 'super_admin')) {
+    return next();
+  }
+  return res.status(403).json({ error: { message: 'Access denied. Admin privileges required.' } });
+};
+
+export const superAdminGuard = (req, res, next) => {
+  if (req.user && (req.userRole === 'super_admin' || req.user.role === 'super_admin')) {
+    return next();
+  }
+  return res.status(403).json({ error: { message: 'Access denied. Super Admin privileges required.' } });
+};

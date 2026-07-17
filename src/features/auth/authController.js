@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
-import { User, Otp, Address } from '../../models/index.js';
+import { User, Otp, Address, Tenant } from '../../models/index.js';
 import { saveBase64Image } from '../../utils/helpers.js';
 
 // Generates a 6-digit OTP
@@ -64,6 +64,12 @@ export const verifyOtp = async (req, res, next) => {
     await otpRecord.save();
 
     const user = await User.findOne({ where: { mobileNumber } });
+    const adminMobile = process.env.ADMIN_MOBILE || '9000000000';
+    if (mobileNumber === adminMobile) {
+      user.role = 'admin';
+      user.status = 'ACTIVE';
+      await user.save();
+    }
     const tempToken = jwt.sign(
       { userId: user.id, isTemp: true },
       process.env.JWT_SECRET || 'super_secret_jwt_sign_key_12345_grocery_app_2026',
@@ -87,7 +93,7 @@ export const login = async (req, res, next) => {
       mobile: z.string(),
       otpId: z.string(),
       otp: z.string(),
-      role: z.enum(['merchant', 'consumer', 'delivery']).optional()
+      role: z.enum(['merchant', 'consumer', 'delivery', 'admin', 'super_admin']).optional()
     });
     const { mobile, otpId, otp, role: selectedRole } = schema.parse(req.body);
 
@@ -109,18 +115,52 @@ export const login = async (req, res, next) => {
     }
 
     const user = await User.findOne({ where: { mobileNumber: mobile } });
+    const adminMobile = process.env.ADMIN_MOBILE || '9000000000';
+    const superAdminMobile = process.env.SUPER_ADMIN_MOBILE || '9999999999';
+
+    if (selectedRole === 'admin') {
+      const isMasterAdmin = mobile === adminMobile;
+      const isPromotedAdmin = user && (user.role === 'admin' || user.role === 'super_admin');
+      if (!isMasterAdmin && !isPromotedAdmin) {
+        return res.status(400).json({ error: { message: 'Access denied. Only registered admins can log in as admin.' } });
+      }
+    }
+    if (selectedRole === 'super_admin' && mobile !== superAdminMobile) {
+      return res.status(400).json({ error: { message: 'Access denied. Only the registered super admin mobile number can log in as super admin.' } });
+    }
 
     // Derive role from existing business ownership
     const businessIds = Array.isArray(user.misc?.businessId) ? user.misc.businessId : [];
     const hasBusiness = businessIds.length > 0;
 
     let role = selectedRole || user.role;
-    if (!role) {
-      role = hasBusiness ? 'merchant' : 'consumer';
+    if (mobile === superAdminMobile) {
+      role = 'super_admin';
+    } else if (mobile === adminMobile) {
+      role = 'admin';
+    } else {
+      const isPromotedAdmin = user && (user.role === 'admin' || user.role === 'super_admin');
+      if (role === 'admin' && !isPromotedAdmin) {
+        role = 'consumer';
+      }
+      if (role === 'super_admin') {
+        role = 'consumer';
+      }
+      if (!role) {
+        role = hasBusiness ? 'merchant' : 'consumer';
+      }
     }
 
     // Persist role changes
-    if (selectedRole && user.role !== selectedRole) {
+    if (mobile === superAdminMobile) {
+      user.role = 'super_admin';
+      user.status = 'ACTIVE';
+      await user.save();
+    } else if (mobile === adminMobile) {
+      user.role = 'admin';
+      user.status = 'ACTIVE';
+      await user.save();
+    } else if (selectedRole && selectedRole !== 'admin' && selectedRole !== 'super_admin' && user.role !== selectedRole) {
       user.role = selectedRole;
       await user.save();
     }
@@ -266,15 +306,22 @@ export const onboardDelivery = async (req, res, next) => {
       lastName: z.string(),
       bikeRegNumber: z.string(),
       dlPic: z.string().optional().nullable(),
+      tenantId: z.string().optional().nullable(),
       address: addressSchema
     });
 
-    const { firstName, lastName, bikeRegNumber, dlPic, address: addressData } = schema.parse(req.body);
+    const { firstName, lastName, bikeRegNumber, dlPic, tenantId, address: addressData } = schema.parse(req.body);
     const user = req.user;
 
     user.firstName = firstName;
     user.lastName = lastName;
-    user.status = 'ACTIVE';
+    user.status = 'PENDING_APPROVAL';
+    user.role = 'delivery';
+    if (tenantId && tenantId !== 'standalone') {
+      user.tenantId = tenantId;
+    } else {
+      user.tenantId = null;
+    }
 
     let dlPicUrl = null;
     if (dlPic) {
@@ -326,6 +373,18 @@ export const registerDeviceToken = async (req, res, next) => {
     req.user.deviceToken = deviceToken;
     await req.user.save();
     return res.status(200).json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getTenantsPublic = async (req, res, next) => {
+  try {
+    const tenants = await Tenant.findAll({
+      where: { status: 'ACTIVE' },
+      attributes: ['id', 'name', 'code']
+    });
+    return res.status(200).json(tenants);
   } catch (error) {
     next(error);
   }

@@ -16,7 +16,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Import Sequelize database and models
-import { sequelize, BusinessType, ProductCategory } from './models/index.js';
+import { sequelize, BusinessType, ProductCategory, Tenant } from './models/index.js';
 
 // Initialize App
 const app = express();
@@ -74,6 +74,15 @@ async function seedDatabase() {
         { category: 'Pantry Staples' }
       ]);
       console.log('Seeded initial Product Categories.');
+    }
+
+    const tenantCount = await Tenant.count();
+    if (tenantCount === 0) {
+      await Tenant.bulkCreate([
+        { name: 'FreshMart Grocery', code: 'FRESH', status: 'ACTIVE' },
+        { name: 'MedLife Pharmacy', code: 'PHARMA', status: 'ACTIVE' }
+      ]);
+      console.log('Seeded initial Tenants.');
     }
   } catch (error) {
     console.error('Database seeding failed:', error.message);

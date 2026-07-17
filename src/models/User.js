@@ -46,6 +46,10 @@ export const User = sequelize.define('User', {
     allowNull: true,
     defaultValue: 'consumer'
   },
+  tenantId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
   misc: {
     type: DataTypes.JSON,
     allowNull: true,
