@@ -17,6 +17,7 @@ const __dirname = path.dirname(__filename);
 
 // Import Sequelize database and models
 import { sequelize, BusinessType, ProductCategory, Tenant } from './models/index.js';
+import { CATEGORY_SEED } from './config/categories.js';
 
 // Initialize App
 const app = express();
@@ -62,19 +63,20 @@ async function seedDatabase() {
       console.log('Seeded initial Business Types.');
     }
 
-    const categoryCount = await ProductCategory.count();
-    if (categoryCount === 0) {
-      await ProductCategory.bulkCreate([
-        { category: 'Fruits' },
-        { category: 'Vegetables' },
-        { category: 'Dairy & Eggs' },
-        { category: 'Bakery & Bread' },
-        { category: 'Beverages' },
-        { category: 'Snacks & Sweets' },
-        { category: 'Pantry Staples' }
-      ]);
-      console.log('Seeded initial Product Categories.');
+    // Upsert the full category taxonomy so new categories are added and
+    // existing rows are backfilled with icon/units/order on each startup.
+    let categoriesSynced = 0;
+    for (const cat of CATEGORY_SEED) {
+      const [row, created] = await ProductCategory.findOrCreate({
+        where: { category: cat.category },
+        defaults: { icon: cat.icon, units: cat.units, displayOrder: cat.displayOrder }
+      });
+      if (!created) {
+        await row.update({ icon: cat.icon, units: cat.units, displayOrder: cat.displayOrder });
+      }
+      categoriesSynced += 1;
     }
+    console.log(`Synced ${categoriesSynced} Product Categories.`);
 
     const tenantCount = await Tenant.count();
     if (tenantCount === 0) {

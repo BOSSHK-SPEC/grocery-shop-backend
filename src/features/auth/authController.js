@@ -1,7 +1,7 @@
-import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import { User, Otp, Address, Tenant } from '../../models/index.js';
 import { saveBase64Image } from '../../utils/helpers.js';
+import { signAccessToken, issueRefreshToken, rotateRefreshToken, revokeRefreshToken } from '../../utils/tokens.js';
 
 // Generates a 6-digit OTP
 const generateOTP = () => {
@@ -70,11 +70,7 @@ export const verifyOtp = async (req, res, next) => {
       user.status = 'ACTIVE';
       await user.save();
     }
-    const tempToken = jwt.sign(
-      { userId: user.id, isTemp: true },
-      process.env.JWT_SECRET || 'super_secret_jwt_sign_key_12345_grocery_app_2026',
-      { expiresIn: '15m' }
-    );
+    const tempToken = signAccessToken({ userId: user.id, isTemp: true }, { expiresIn: '15m' });
 
     // Return OtpResponseModel format
     return res.status(200).json({
@@ -165,15 +161,13 @@ export const login = async (req, res, next) => {
       await user.save();
     }
 
-    const accessToken = jwt.sign(
-      { userId: user.id, role },
-      process.env.JWT_SECRET || 'super_secret_jwt_sign_key_12345_grocery_app_2026',
-      { expiresIn: '30d' }
-    );
+    const accessToken = signAccessToken({ userId: user.id, role });
+    const { token: refreshToken } = await issueRefreshToken(user.id);
 
     // Return LoginModel format
     return res.status(200).json({
       accessToken,
+      refreshToken,
       tokenType: 'Bearer',
       status: user.status,
       role,
@@ -190,6 +184,45 @@ export const login = async (req, res, next) => {
         misc: user.misc
       }
     });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /auth/refresh — exchange a valid refresh token for a fresh access token
+ * and a rotated refresh token. On reuse of an already-rotated token, all of the
+ * user's refresh tokens are revoked (theft response) and 401 is returned.
+ */
+export const refreshToken = async (req, res, next) => {
+  try {
+    const provided = req.body?.refreshToken;
+    const rotated = await rotateRefreshToken(provided);
+    const user = await User.findByPk(rotated.userId);
+    if (!user) {
+      return res.status(401).json({ error: { message: 'User not found.' } });
+    }
+    const accessToken = signAccessToken({ userId: user.id, role: user.role });
+    return res.status(200).json({
+      accessToken,
+      refreshToken: rotated.refreshToken,
+      tokenType: 'Bearer',
+      role: user.role,
+      status: user.status
+    });
+  } catch (error) {
+    if (error.code) {
+      return res.status(401).json({ error: { message: error.message, code: error.code } });
+    }
+    next(error);
+  }
+};
+
+// POST /auth/logout — revoke the presented refresh token (best-effort).
+export const logout = async (req, res, next) => {
+  try {
+    await revokeRefreshToken(req.body?.refreshToken);
+    return res.status(200).json({ message: 'Logged out.' });
   } catch (error) {
     next(error);
   }
@@ -234,13 +267,17 @@ export const onboardConsumer = async (req, res, next) => {
 
     await user.save();
 
-    // Create or update address
-    let address = await Address.findOne({ where: { userId: user.id } });
+    // Create or update the user's default address
+    let address = await Address.findOne({
+      where: { userId: user.id },
+      order: [['isDefault', 'DESC'], ['createdAt', 'ASC']]
+    });
     if (address) {
       await address.update(addressData);
     } else {
       address = await Address.create({
         userId: user.id,
+        isDefault: true,
         ...addressData
       });
     }
@@ -265,7 +302,10 @@ export const onboardConsumer = async (req, res, next) => {
 export const getConsumerProfile = async (req, res, next) => {
   try {
     const user = req.user;
-    const address = await Address.findOne({ where: { userId: user.id } });
+    const address = await Address.findOne({
+      where: { userId: user.id },
+      order: [['isDefault', 'DESC'], ['createdAt', 'ASC']]
+    });
     return res.status(200).json({
       owner: {
         id: user.id,

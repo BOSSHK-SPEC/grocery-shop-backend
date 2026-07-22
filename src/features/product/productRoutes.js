@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { authGuard } from '../../middleware/auth.js';
 import {
   getProductCategories,
+  getAllCategories,
   getAllProducts,
   createProduct,
   updateProduct,
@@ -11,6 +12,7 @@ import {
 
 export const productRouter = Router();
 
+productRouter.get('/categories', authGuard, getAllCategories);
 productRouter.get('/product', authGuard, getProductsAcrossBusinesses);
 productRouter.get('/product/:businessId/productCategory', authGuard, getProductCategories);
 productRouter.get('/product/:businessId/allProduct', authGuard, getAllProducts);

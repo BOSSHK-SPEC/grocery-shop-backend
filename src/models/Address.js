@@ -15,6 +15,16 @@ export const Address = sequelize.define('Address', {
     type: DataTypes.UUID,
     allowNull: true
   },
+  label: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: 'Home'
+  },
+  isDefault: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false
+  },
   line1: {
     type: DataTypes.STRING,
     allowNull: false

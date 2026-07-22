@@ -11,6 +11,9 @@ import { Bill } from './Bill.js';
 import { Notification } from './Notification.js';
 import { ChatMessage } from './ChatMessage.js';
 import { Tenant } from './Tenant.js';
+import { Rating } from './Rating.js';
+import { Complaint } from './Complaint.js';
+import { RefreshToken } from './RefreshToken.js';
 
 // Setup Relationships
 
@@ -67,6 +70,16 @@ Order.belongsTo(User, { foreignKey: 'deliveryPartnerId', as: 'deliveryPartner' }
 Order.hasMany(ChatMessage, { foreignKey: 'orderId', as: 'chatMessages', onDelete: 'CASCADE' });
 ChatMessage.belongsTo(Order, { foreignKey: 'orderId' });
 
+// Order - Rating / Complaint (One to Many)
+Order.hasMany(Rating, { foreignKey: 'orderId', as: 'ratings', onDelete: 'CASCADE' });
+Rating.belongsTo(Order, { foreignKey: 'orderId' });
+Order.hasMany(Complaint, { foreignKey: 'orderId', as: 'complaints', onDelete: 'CASCADE' });
+Complaint.belongsTo(Order, { foreignKey: 'orderId' });
+
+// User - RefreshToken (One to Many)
+User.hasMany(RefreshToken, { foreignKey: 'userId', as: 'refreshTokens', onDelete: 'CASCADE' });
+RefreshToken.belongsTo(User, { foreignKey: 'userId' });
+
 export {
   sequelize,
   User,
@@ -81,5 +94,8 @@ export {
   Notification,
   ChatMessage,
   BusinessBusinessType,
-  Tenant
+  Tenant,
+  Rating,
+  Complaint,
+  RefreshToken
 };

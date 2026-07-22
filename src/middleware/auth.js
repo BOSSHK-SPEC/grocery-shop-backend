@@ -1,5 +1,5 @@
-import jwt from 'jsonwebtoken';
 import { User } from '../models/index.js';
+import { verifyAccessToken } from '../utils/tokens.js';
 
 export const authGuard = async (req, res, next) => {
   try {
@@ -9,7 +9,7 @@ export const authGuard = async (req, res, next) => {
     }
 
     const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'super_secret_jwt_sign_key_12345_grocery_app_2026');
+    const decoded = verifyAccessToken(token);
 
     const user = await User.findByPk(decoded.userId);
     if (!user) {

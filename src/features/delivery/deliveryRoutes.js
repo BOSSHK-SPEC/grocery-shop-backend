@@ -20,6 +20,12 @@ deliveryRouter.post('/orders/:id/claim', deliveryController.claimDelivery);
 deliveryRouter.post('/orders/:id/pickup', deliveryController.startDelivery);
 deliveryRouter.post('/orders/:id/complete', deliveryController.completeDelivery);
 
+// Ratings & Complaints APIs
+deliveryRouter.post('/orders/:id/rate', deliveryController.rateOrder);
+deliveryRouter.get('/orders/:id/ratings', deliveryController.getOrderRatings);
+deliveryRouter.post('/orders/:id/complaint', deliveryController.fileComplaint);
+deliveryRouter.get('/riders/:riderId/rating', deliveryController.getRiderRating);
+
 // Chat APIs
 deliveryRouter.get('/orders/:orderId/chat', deliveryController.getChatMessages);
 deliveryRouter.post('/orders/:orderId/chat', deliveryController.sendChatMessage);

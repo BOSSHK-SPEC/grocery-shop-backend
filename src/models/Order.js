@@ -49,8 +49,32 @@ export const Order = sequelize.define('Order', {
     type: DataTypes.JSON,
     allowNull: false
   },
+  deliveryAddress: {
+    // Snapshot of the delivery address chosen at checkout, so the order keeps
+    // the correct address even if the customer later edits/removes it.
+    type: DataTypes.JSON,
+    allowNull: true
+  },
   deliveryPartnerId: {
     type: DataTypes.UUID,
+    allowNull: true
+  },
+  paymentMethod: {
+    type: DataTypes.STRING, // 'razorpay' | 'cod'
+    allowNull: false,
+    defaultValue: 'cod'
+  },
+  paymentStatus: {
+    type: DataTypes.STRING, // 'PAID' | 'PENDING' | 'COD'
+    allowNull: false,
+    defaultValue: 'COD'
+  },
+  paymentId: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  paymentOrderId: {
+    type: DataTypes.STRING,
     allowNull: true
   }
 }, {

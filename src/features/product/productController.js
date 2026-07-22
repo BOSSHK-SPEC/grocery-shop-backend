@@ -5,12 +5,30 @@ import { saveBase64Image, resolveBusiness } from '../../utils/helpers.js';
 
 export const getProductCategories = async (req, res, next) => {
   try {
-    const categories = await ProductCategory.findAll();
+    const categories = await ProductCategory.findAll({ order: [['displayOrder', 'ASC']] });
     const formattedCategories = categories.map(cat => ({
       id: cat.id,
       catgory: cat.category // Map to "catgory" spelling expected by frontend model
     }));
     return res.status(200).json(formattedCategories);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Global category catalogue (not business-scoped) for the consumer app:
+// full objects with icon + allowed quantity units, ordered for display.
+export const getAllCategories = async (req, res, next) => {
+  try {
+    const categories = await ProductCategory.findAll({ order: [['displayOrder', 'ASC']] });
+    const formatted = categories.map(cat => ({
+      id: cat.id,
+      category: cat.category,
+      icon: cat.icon || '🛒',
+      units: Array.isArray(cat.units) ? cat.units : [],
+      displayOrder: cat.displayOrder,
+    }));
+    return res.status(200).json(formatted);
   } catch (error) {
     next(error);
   }
@@ -35,6 +53,7 @@ export const createProduct = async (req, res, next) => {
     const schema = z.object({
       category: z.string(),
       price: z.union([z.number(), z.string()]).transform(val => parseFloat(val) || 0),
+      mrp: z.union([z.number(), z.string()]).optional().nullable().transform(val => (val === null || val === undefined || val === '') ? null : parseFloat(val) || null),
       pricePerQuantity: z.union([z.number(), z.string()]).transform(val => parseFloat(val) || 0),
       pricePerQuantityUnit: z.string(),
       productName: z.string(),
@@ -71,6 +90,7 @@ export const createProduct = async (req, res, next) => {
       productName: validatedData.productName,
       productThumbnail: savedThumbnails,
       price: validatedData.price,
+      mrp: validatedData.mrp,
       pricePerQuantity: validatedData.pricePerQuantity,
       pricePerQuantityUnit: validatedData.pricePerQuantityUnit,
       category: validatedData.category,
@@ -104,6 +124,11 @@ export const updateProduct = async (req, res, next) => {
       productName: z.string().optional(),
       productThumbnail: z.array(z.string()).optional(),
       price: z.union([z.number(), z.string()]).transform(val => parseFloat(val)).optional(),
+      // Key absent -> undefined (leave mrp unchanged, per the `!== undefined`
+      // check below). Explicit null/'' -> clears mrp. A number -> sets it.
+      mrp: z.union([z.number(), z.string()]).nullable().optional().transform(
+        val => val === undefined ? undefined : (val === null || val === '') ? null : (parseFloat(val) || null)
+      ),
       pricePerQuantity: z.union([z.number(), z.string()]).transform(val => parseFloat(val)).optional(),
       pricePerQuantityUnit: z.string().optional(),
       brandName: z.string().optional().nullable(),
@@ -131,6 +156,7 @@ export const updateProduct = async (req, res, next) => {
       productName: validatedData.productName !== undefined ? validatedData.productName : product.productName,
       productThumbnail: savedThumbnails,
       price: validatedData.price !== undefined ? validatedData.price : product.price,
+      mrp: validatedData.mrp !== undefined ? validatedData.mrp : product.mrp,
       pricePerQuantity: validatedData.pricePerQuantity !== undefined ? validatedData.pricePerQuantity : product.pricePerQuantity,
       pricePerQuantityUnit: validatedData.pricePerQuantityUnit !== undefined ? validatedData.pricePerQuantityUnit : product.pricePerQuantityUnit,
       category: validatedData.category !== undefined ? validatedData.category : product.category,
