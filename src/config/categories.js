@@ -1,0 +1,56 @@
+// Master grocery / q-commerce category taxonomy.
+// Each entry: { category, icon (emoji), units (allowed quantity units), displayOrder }.
+// Seeded via upsert on startup — add/adjust here and restart to sync.
+
+export const CATEGORY_SEED = [
+  { category: 'Fruits',                       icon: '🍎', units: ['kg', 'g', 'piece', 'dozen', 'pack'] },
+  { category: 'Vegetables',                   icon: '🥦', units: ['kg', 'g', 'piece', 'bunch', 'pack'] },
+  { category: 'Dairy & Eggs',                 icon: '🥛', units: ['L', 'ml', 'piece', 'dozen', 'pack'] },
+  { category: 'Bakery & Bread',               icon: '🍞', units: ['piece', 'pack', 'dozen', 'box'] },
+  { category: 'Beverages',                    icon: '🥤', units: ['L', 'ml', 'bottle', 'can', 'pack'] },
+  { category: 'Snacks & Namkeen',             icon: '🍿', units: ['g', 'kg', 'pack', 'box'] },
+  { category: 'Chocolates & Candy',           icon: '🍫', units: ['g', 'piece', 'pack', 'box'] },
+  { category: 'Ice Cream & Desserts',         icon: '🍦', units: ['ml', 'L', 'tub', 'pack', 'piece'] },
+  { category: 'Pantry Staples',               icon: '🫙', units: ['kg', 'g', 'pack'] },
+  { category: 'Rice & Grains',                icon: '🌾', units: ['kg', 'g', 'pack'] },
+  { category: 'Atta, Flour & Sooji',          icon: '🌾', units: ['kg', 'g', 'pack'] },
+  { category: 'Dals & Pulses',                icon: '🫘', units: ['kg', 'g', 'pack'] },
+  { category: 'Spices & Masalas',             icon: '🌶️', units: ['kg', 'g', 'pack', 'box'] },
+  { category: 'Cooking Oils & Ghee',          icon: '🛢️', units: ['L', 'ml', 'kg', 'g', 'bottle', 'pack'] },
+  { category: 'Salt, Sugar & Jaggery',        icon: '🧂', units: ['kg', 'g', 'pack'] },
+  { category: 'Dry Fruits & Nuts',            icon: '🥜', units: ['kg', 'g', 'pack', 'box'] },
+  { category: 'Tea, Coffee & More',           icon: '☕', units: ['kg', 'g', 'pack', 'box'] },
+  { category: 'Breakfast & Cereals',          icon: '🥣', units: ['g', 'kg', 'pack', 'box'] },
+  { category: 'Sauces, Ketchup & Spreads',    icon: '🍯', units: ['g', 'ml', 'bottle', 'jar', 'pack'] },
+  { category: 'Pickles & Chutneys',           icon: '🥫', units: ['g', 'kg', 'jar', 'pack'] },
+  { category: 'Noodles, Pasta & Vermicelli',  icon: '🍜', units: ['g', 'kg', 'pack', 'box'] },
+  { category: 'Instant & Ready to Eat',       icon: '🍲', units: ['g', 'pack', 'box'] },
+  { category: 'Frozen Foods',                 icon: '🧊', units: ['g', 'kg', 'pack', 'box'] },
+  { category: 'Meat & Poultry',               icon: '🍗', units: ['kg', 'g', 'piece', 'pack'] },
+  { category: 'Fish & Seafood',               icon: '🐟', units: ['kg', 'g', 'piece', 'pack'] },
+  { category: 'Canned & Packaged Food',       icon: '🥫', units: ['g', 'can', 'pack', 'box'] },
+  { category: 'Baking Essentials',            icon: '🧁', units: ['kg', 'g', 'pack', 'box'] },
+  { category: 'Health & Nutrition',           icon: '💊', units: ['g', 'pack', 'bottle', 'box'] },
+  { category: 'Baby Care',                    icon: '🍼', units: ['g', 'kg', 'pack', 'piece', 'bottle'] },
+  { category: 'Personal Care',                icon: '🧴', units: ['ml', 'g', 'piece', 'pack', 'bottle'] },
+  { category: 'Hair Care',                    icon: '💆', units: ['ml', 'g', 'bottle', 'pack', 'piece'] },
+  { category: 'Skin Care',                    icon: '🧖', units: ['ml', 'g', 'bottle', 'tube', 'piece'] },
+  { category: 'Oral Care',                    icon: '🪥', units: ['g', 'ml', 'piece', 'pack'] },
+  { category: 'Bath & Body',                  icon: '🧼', units: ['g', 'ml', 'piece', 'pack'] },
+  { category: 'Feminine Hygiene',             icon: '🌸', units: ['piece', 'pack', 'box'] },
+  { category: 'Cleaning & Household',         icon: '🧽', units: ['L', 'ml', 'kg', 'g', 'piece', 'pack'] },
+  { category: 'Laundry & Detergents',         icon: '🧺', units: ['kg', 'g', 'L', 'ml', 'pack', 'piece'] },
+  { category: 'Kitchen & Dining',             icon: '🍽️', units: ['piece', 'pack', 'set'] },
+  { category: 'Disposables & Garbage Bags',   icon: '🗑️', units: ['piece', 'pack', 'box'] },
+  { category: 'Pooja Needs',                  icon: '🪔', units: ['piece', 'pack', 'box', 'g'] },
+  { category: 'Pet Care',                     icon: '🐾', units: ['kg', 'g', 'pack', 'can', 'piece'] },
+  { category: 'Stationery & Office',          icon: '📎', units: ['piece', 'pack', 'box'] },
+  { category: 'Flowers & Plants',             icon: '🌷', units: ['piece', 'bunch', 'pack'] },
+  { category: 'Paan Corner',                  icon: '🍃', units: ['piece', 'pack'] },
+].map((c, i) => ({ ...c, displayOrder: i }));
+
+// Universal quantity units available in the product form regardless of category.
+export const ALL_UNITS = [
+  'kg', 'g', 'L', 'ml', 'piece', 'dozen', 'pack', 'box', 'bottle',
+  'can', 'jar', 'bunch', 'tub', 'tube', 'set', 'packet',
+];

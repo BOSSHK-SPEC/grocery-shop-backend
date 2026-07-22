@@ -4,6 +4,7 @@ import { Business, Order, Product, Address, User } from '../../models/index.js';
 import { resolveBusiness } from '../../utils/helpers.js';
 import { sendToUser } from '../../utils/notify.js';
 import { notifyMerchant } from '../../utils/websocket.js';
+import { verifyPaymentSignature } from '../../config/razorpay.js';
 import {
   ALL_STATUSES,
   OrderStatus,
@@ -152,9 +153,54 @@ export const createOrder = async (req, res, next) => {
     const schema = z.object({
       customerName: z.string(),
       amount: z.union([z.number(), z.string()]).transform(val => parseFloat(val) || 0),
-      items: z.array(z.any())
+      items: z.array(z.any()),
+      addressId: z.string().optional().nullable(),
+      deliveryAddress: z.any().optional().nullable(),
+      // Optional online-payment proof (Razorpay). Absent => Cash on Delivery.
+      razorpayOrderId: z.string().optional().nullable(),
+      razorpayPaymentId: z.string().optional().nullable(),
+      razorpaySignature: z.string().optional().nullable()
     });
     const data = schema.parse(req.body);
+
+    // Resolve payment: if Razorpay proof is supplied, verify the signature;
+    // reject the order if verification fails. Otherwise treat as COD.
+    let paymentMethod = 'cod';
+    let paymentStatus = 'COD';
+    let paymentId = null;
+    let paymentOrderId = null;
+    if (data.razorpayPaymentId && data.razorpayOrderId && data.razorpaySignature) {
+      const ok = verifyPaymentSignature({
+        orderId: data.razorpayOrderId,
+        paymentId: data.razorpayPaymentId,
+        signature: data.razorpaySignature
+      });
+      if (!ok) {
+        return res.status(400).json({ error: { message: 'Payment verification failed.' } });
+      }
+      paymentMethod = 'razorpay';
+      paymentStatus = 'PAID';
+      paymentId = data.razorpayPaymentId;
+      paymentOrderId = data.razorpayOrderId;
+    }
+
+    // Resolve the delivery address snapshot: prefer an explicit saved address,
+    // then a raw address object, then the customer's default address.
+    let deliveryAddress = null;
+    if (data.addressId && req.user) {
+      const addr = await Address.findOne({ where: { id: data.addressId, userId: req.user.id } });
+      if (addr) deliveryAddress = addr.toJSON();
+    }
+    if (!deliveryAddress && data.deliveryAddress) {
+      deliveryAddress = data.deliveryAddress;
+    }
+    if (!deliveryAddress && req.user) {
+      const addr = await Address.findOne({
+        where: { userId: req.user.id },
+        order: [['isDefault', 'DESC'], ['createdAt', 'ASC']]
+      });
+      if (addr) deliveryAddress = addr.toJSON();
+    }
 
     // Verify stock levels first
     for (const item of data.items) {
@@ -190,7 +236,12 @@ export const createOrder = async (req, res, next) => {
       status: OrderStatus.PENDING,
       statusHistory: [{ status: OrderStatus.PENDING, by: 'customer', at: new Date().toISOString() }],
       date,
-      items: data.items
+      items: data.items,
+      deliveryAddress,
+      paymentMethod,
+      paymentStatus,
+      paymentId,
+      paymentOrderId
     });
 
     // Notify the store owner of the new incoming order (no-op if FCM off).
@@ -243,7 +294,7 @@ export const getConsumerOrders = async (req, res, next) => {
       j.storeCode = j.Business?.businessCode ?? null;
       j.storeImage = j.Business?.businessDp ?? null;
       j.storeAddress = j.Business?.address ?? null;
-      j.customerAddress = j.customer?.address ?? null;
+      j.customerAddress = j.deliveryAddress ?? j.customer?.address ?? null;
       delete j.Business;
       delete j.customer;
       return j;

@@ -32,6 +32,22 @@ export const Product = sequelize.define('Product', {
     type: DataTypes.DOUBLE,
     allowNull: false
   },
+  mrp: {
+    // Optional "before discount" price. When set and > price, the frontend
+    // shows a strikethrough MRP + a "₹X OFF" badge. Null = no discount shown.
+    type: DataTypes.DOUBLE,
+    allowNull: true
+  },
+  rating: {
+    // Average rating 0-5. Null = no rating shown (never fabricated client-side).
+    type: DataTypes.DOUBLE,
+    allowNull: true
+  },
+  ratingCount: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0
+  },
   pricePerQuantity: {
     type: DataTypes.DOUBLE,
     allowNull: false
