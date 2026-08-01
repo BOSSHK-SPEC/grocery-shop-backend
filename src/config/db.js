@@ -3,6 +3,10 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+if (process.env.NODE_ENV === 'production' && !process.env.DB_PASS) {
+  throw new Error('DB_PASS must be set in production — refusing to start with an empty database password.');
+}
+
 const sequelize = new Sequelize(
   process.env.DB_NAME || 'grocery_app',
   process.env.DB_USER || 'root',

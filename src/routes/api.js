@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { authRouter } from '../features/auth/authRoutes.js';
 import { addressRouter } from '../features/address/addressRoutes.js';
+import { favoritesRouter } from '../features/favorites/favoritesRoutes.js';
+import { couponRouter } from '../features/coupon/couponRoutes.js';
 import { businessRouter } from '../features/business/businessRoutes.js';
 import { orderRouter } from '../features/order/orderRoutes.js';
 import { billingRouter } from '../features/billing/billingRoutes.js';
@@ -15,6 +17,8 @@ export const apiRouter = Router();
 
 apiRouter.use(authRouter);
 apiRouter.use(addressRouter);
+apiRouter.use(favoritesRouter);
+apiRouter.use(couponRouter);
 apiRouter.use(businessRouter);
 apiRouter.use(orderRouter);
 apiRouter.use(billingRouter);

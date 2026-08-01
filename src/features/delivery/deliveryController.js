@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { Order, User, Business, Address, ChatMessage, Rating, Complaint } from '../../models/index.js';
 import { OrderStatus } from '../order/orderStatus.js';
 import { sendToUser } from '../../utils/notify.js';
@@ -212,12 +213,14 @@ export const completeDelivery = async (req, res, next) => {
   }
 };
 
+const locationSchema = z.object({
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180)
+});
+
 export const updateLocation = async (req, res, next) => {
   try {
-    const { latitude, longitude } = req.body;
-    if (latitude === undefined || longitude === undefined) {
-      return res.status(400).json({ error: { message: 'Latitude and longitude are required.' } });
-    }
+    const { latitude, longitude } = locationSchema.parse(req.body);
     const user = await User.findByPk(req.user.id);
     if (!user) {
       return res.status(404).json({ error: { message: 'User not found.' } });
@@ -275,10 +278,8 @@ export const getChatMessages = async (req, res, next) => {
 export const sendChatMessage = async (req, res, next) => {
   try {
     const { orderId } = req.params;
-    const { message } = req.body;
-    if (!message || message.trim() === '') {
-      return res.status(400).json({ error: { message: 'Message is required.' } });
-    }
+    const { message: rawMessage } = z.object({ message: z.string().trim().min(1).max(2000) }).parse(req.body);
+    const message = rawMessage;
     const order = await Order.findByPk(orderId);
     if (!order) {
       return res.status(404).json({ error: { message: 'Order not found.' } });
@@ -436,10 +437,7 @@ export const getRiderRating = async (req, res, next) => {
 
 export const toggleOnlineStatus = async (req, res, next) => {
   try {
-    const { isOnline } = req.body;
-    if (isOnline === undefined) {
-      return res.status(400).json({ error: { message: 'isOnline status is required.' } });
-    }
+    const { isOnline } = z.object({ isOnline: z.boolean() }).parse(req.body);
     const user = await User.findByPk(req.user.id);
     if (!user) {
       return res.status(404).json({ error: { message: 'User not found.' } });

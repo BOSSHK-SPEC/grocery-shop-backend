@@ -76,6 +76,29 @@ export const Order = sequelize.define('Order', {
   paymentOrderId: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  couponCode: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  couponDiscount: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: false,
+    defaultValue: 0
+  },
+  tipAmount: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: false,
+    defaultValue: 0
+  },
+  noPlasticBag: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false
+  },
+  deliveryInstructions: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   timestamps: true
