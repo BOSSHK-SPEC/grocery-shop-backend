@@ -21,7 +21,8 @@ export const requestOtp = async (req, res, next) => {
       user = await User.create({ mobileNumber: mobile });
     }
 
-    const otpCode = process.env.NODE_ENV === 'development' ? '123456' : generateOTP();
+    const isProduction = process.env.NODE_ENV === 'production';
+    const otpCode = isProduction ? generateOTP() : '123456';
     const expiry = new Date(Date.now() + (parseInt(process.env.OTP_EXPIRY_MINUTES) || 5) * 60 * 1000);
 
     const otpRecord = await Otp.create({
@@ -30,7 +31,11 @@ export const requestOtp = async (req, res, next) => {
       expiresAt: expiry
     });
 
-    console.log(`[OTP] Generated for ${mobile}: ${otpCode} (otpId: ${otpRecord.otpId})`);
+    if (!isProduction) {
+      console.log(`[OTP] Test OTP issued for ${mobile}: ${otpCode} (otpId: ${otpRecord.otpId})`);
+    } else {
+      console.log(`[OTP] Generated for ${mobile} (otpId: ${otpRecord.otpId})`);
+    }
 
     // Return format matching UserModel
     return res.status(200).json({
@@ -103,7 +108,7 @@ export const login = async (req, res, next) => {
       const pendingOtp = await Otp.findOne({
         where: { otpId, mobileNumber: mobile, otp, status: 'PENDING' }
       });
-      if (!pendingOtp || pendingOtp.expiresAt < new Date()) {
+      if (!pendingOtp || new Date(pendingOtp.expiresAt).getTime() < Date.now()) {
         return res.status(400).json({ error: { message: 'Invalid or expired OTP.' } });
       }
       pendingOtp.status = 'VERIFIED';
@@ -425,6 +430,45 @@ export const getTenantsPublic = async (req, res, next) => {
       attributes: ['id', 'name', 'code']
     });
     return res.status(200).json(tenants);
+  } catch (error) {
+    next(error);
+  }
+};
+
+/** Verified 2-Step OTP Account Deletion */
+export const deleteAccount = async (req, res, next) => {
+  try {
+    const schema = z.object({
+      mobileNumber: z.string().min(10),
+      otpId: z.string(),
+      otp: z.string(),
+      reason: z.string().optional()
+    });
+    const { mobileNumber, otpId, otp, reason } = schema.parse(req.body);
+
+    const otpRecord = await Otp.findOne({
+      where: { otpId, mobileNumber, otp, status: 'PENDING' }
+    });
+
+    if (!otpRecord || otpRecord.expiresAt < new Date()) {
+      return res.status(400).json({ error: { message: 'Invalid or expired OTP.' } });
+    }
+
+    otpRecord.status = 'VERIFIED';
+    await otpRecord.save();
+
+    const user = await User.findOne({ where: { mobileNumber } });
+    if (user) {
+      await User.destroy({ where: { id: user.id } });
+      console.log(`[Account Deletion] User ${mobileNumber} deleted successfully. Reason: ${reason || 'Not provided'}`);
+    } else {
+      console.log(`[Account Deletion] No active user found for ${mobileNumber}, marked verification verified.`);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Account and associated personal data deleted successfully.'
+    });
   } catch (error) {
     next(error);
   }

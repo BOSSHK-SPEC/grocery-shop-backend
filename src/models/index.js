@@ -14,6 +14,8 @@ import { Tenant } from './Tenant.js';
 import { Rating } from './Rating.js';
 import { Complaint } from './Complaint.js';
 import { RefreshToken } from './RefreshToken.js';
+import { Favorite } from './Favorite.js';
+import { Coupon } from './Coupon.js';
 
 // Setup Relationships
 
@@ -80,6 +82,16 @@ Complaint.belongsTo(Order, { foreignKey: 'orderId' });
 User.hasMany(RefreshToken, { foreignKey: 'userId', as: 'refreshTokens', onDelete: 'CASCADE' });
 RefreshToken.belongsTo(User, { foreignKey: 'userId' });
 
+// User - Favorite / Product - Favorite (One to Many)
+User.hasMany(Favorite, { foreignKey: 'userId', as: 'favorites', onDelete: 'CASCADE' });
+Favorite.belongsTo(User, { foreignKey: 'userId' });
+Product.hasMany(Favorite, { foreignKey: 'productId', as: 'favoritedBy', onDelete: 'CASCADE' });
+Favorite.belongsTo(Product, { foreignKey: 'productId', as: 'product' });
+
+// Business - Coupon (One to Many). businessId nullable => platform-wide coupon.
+Business.hasMany(Coupon, { foreignKey: 'businessId', as: 'coupons', onDelete: 'CASCADE' });
+Coupon.belongsTo(Business, { foreignKey: 'businessId', as: 'business' });
+
 export {
   sequelize,
   User,
@@ -97,5 +109,7 @@ export {
   Tenant,
   Rating,
   Complaint,
-  RefreshToken
+  RefreshToken,
+  Favorite,
+  Coupon
 };

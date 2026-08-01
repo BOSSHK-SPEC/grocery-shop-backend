@@ -5,6 +5,7 @@ import { resolveBusiness } from '../../utils/helpers.js';
 import { sendToUser } from '../../utils/notify.js';
 import { notifyMerchant } from '../../utils/websocket.js';
 import { verifyPaymentSignature } from '../../config/razorpay.js';
+import { resolveCouponDiscount } from '../coupon/couponController.js';
 import {
   ALL_STATUSES,
   OrderStatus,
@@ -152,6 +153,9 @@ export const createOrder = async (req, res, next) => {
     }
     const schema = z.object({
       customerName: z.string(),
+      // Pre-coupon, pre-tip subtotal+fees total, as displayed at checkout.
+      // The final charged amount is recomputed below from this plus a
+      // server-verified coupon discount and tip — never trusted as-is.
       amount: z.union([z.number(), z.string()]).transform(val => parseFloat(val) || 0),
       items: z.array(z.any()),
       addressId: z.string().optional().nullable(),
@@ -159,9 +163,32 @@ export const createOrder = async (req, res, next) => {
       // Optional online-payment proof (Razorpay). Absent => Cash on Delivery.
       razorpayOrderId: z.string().optional().nullable(),
       razorpayPaymentId: z.string().optional().nullable(),
-      razorpaySignature: z.string().optional().nullable()
+      razorpaySignature: z.string().optional().nullable(),
+      couponCode: z.string().optional().nullable(),
+      tipAmount: z.union([z.number(), z.string()]).optional().transform(v => Math.max(0, parseFloat(v) || 0)),
+      noPlasticBag: z.boolean().optional(),
+      deliveryInstructions: z.string().max(300).optional().nullable()
     });
     const data = schema.parse(req.body);
+
+    // Coupon discount is never taken from the client — recompute it here
+    // against the same rules /consumer/coupons/validate uses, so a tampered
+    // "discountAmount" in the request body has no effect.
+    let couponDiscount = 0;
+    if (data.couponCode) {
+      const result = await resolveCouponDiscount({
+        code: data.couponCode,
+        userId: req.user ? req.user.id : null,
+        businessId: business.id,
+        subtotal: data.amount,
+      });
+      if (!result.ok) {
+        return res.status(400).json({ error: { message: result.message } });
+      }
+      couponDiscount = result.discount;
+    }
+    const tipAmount = data.tipAmount || 0;
+    const finalAmount = Math.max(0, data.amount - couponDiscount + tipAmount);
 
     // Resolve payment: if Razorpay proof is supplied, verify the signature;
     // reject the order if verification fails. Otherwise treat as COD.
@@ -232,7 +259,7 @@ export const createOrder = async (req, res, next) => {
       customerId: req.user ? req.user.id : null,
       orderCode,
       customerName: data.customerName,
-      amount: data.amount,
+      amount: finalAmount,
       status: OrderStatus.PENDING,
       statusHistory: [{ status: OrderStatus.PENDING, by: 'customer', at: new Date().toISOString() }],
       date,
@@ -241,7 +268,12 @@ export const createOrder = async (req, res, next) => {
       paymentMethod,
       paymentStatus,
       paymentId,
-      paymentOrderId
+      paymentOrderId,
+      couponCode: data.couponCode || null,
+      couponDiscount,
+      tipAmount,
+      noPlasticBag: data.noPlasticBag || false,
+      deliveryInstructions: data.deliveryInstructions || null
     });
 
     // Notify the store owner of the new incoming order (no-op if FCM off).
@@ -249,7 +281,7 @@ export const createOrder = async (req, res, next) => {
       sendToUser(
         business.ownerId,
         `New order ${orderCode}`,
-        `${data.customerName} placed an order worth ₹${data.amount}.`,
+        `${data.customerName} placed an order worth ₹${finalAmount}.`,
         { type: 'new_order', orderId: newOrder.id }
       );
     }
