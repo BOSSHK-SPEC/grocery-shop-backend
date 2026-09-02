@@ -99,6 +99,14 @@ export const Order = sequelize.define('Order', {
   deliveryInstructions: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  pricing: {
+    // Server-computed breakdown captured at checkout for audit/disputes:
+    // { subtotal, fees:{deliveryFee,handlingFee,platformFee,gstTax},
+    //   preCouponAmount, couponDiscount, tipAmount, finalAmount }.
+    // Nullable so orders created before this column existed still load.
+    type: DataTypes.JSON,
+    allowNull: true
   }
 }, {
   timestamps: true

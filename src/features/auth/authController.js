@@ -1,11 +1,46 @@
+import crypto from 'crypto';
 import { z } from 'zod';
 import { User, Otp, Address, Tenant } from '../../models/index.js';
 import { saveBase64Image } from '../../utils/helpers.js';
 import { signAccessToken, issueRefreshToken, rotateRefreshToken, revokeRefreshToken } from '../../utils/tokens.js';
 
-// Generates a 6-digit OTP
+// Generates a 6-digit OTP from a CSPRNG (Math.random is predictable).
 const generateOTP = () => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+};
+
+// The fixed dev OTP (DEV_OTP, default '200310') is only issued when BOTH hold:
+// the operator opted in with ALLOW_DEV_OTP=true AND the process is not
+// running as production. A missing/mistyped NODE_ENV alone can no longer
+// turn it on.
+const isDevOtpEnabled = () =>
+  process.env.ALLOW_DEV_OTP === 'true' && process.env.NODE_ENV !== 'production';
+
+// The fixed code issued to EVERY account while the dev flag is on.
+// Configurable so the team can rotate it without a code change.
+const DEV_OTP = (process.env.DEV_OTP || '200310').trim();
+
+// ── Review / demo accounts ──────────────────────────────────────────────
+// App-store reviewers (Google Play "App access", Apple review) cannot
+// receive SMS. REVIEW_PHONES is a comma-separated list of phone numbers
+// that always get the fixed REVIEW_OTP — in every environment, production
+// included. The code is never logged and never included in the response,
+// so it is only known to the operator and the store's review form.
+// Example: REVIEW_PHONES=9999900001  REVIEW_OTP=804203
+const reviewOtpFor = (mobile) => {
+  const phones = (process.env.REVIEW_PHONES || '')
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const code = (process.env.REVIEW_OTP || '').trim();
+  if (!code || phones.length === 0) return null;
+  const normalized = mobile.replace(/[^0-9]/g, '');
+  return phones.some((p) => {
+    const pn = p.replace(/[^0-9]/g, '');
+    return pn === normalized || normalized.endsWith(pn) || pn.endsWith(normalized);
+  })
+    ? code
+    : null;
 };
 
 export const requestOtp = async (req, res, next) => {
@@ -21,8 +56,9 @@ export const requestOtp = async (req, res, next) => {
       user = await User.create({ mobileNumber: mobile });
     }
 
-    const isProduction = process.env.NODE_ENV === 'production';
-    const otpCode = isProduction ? generateOTP() : '123456';
+    const reviewOtp = reviewOtpFor(mobile);
+    const devOtp = !reviewOtp && isDevOtpEnabled();
+    const otpCode = reviewOtp || (devOtp ? DEV_OTP : generateOTP());
     const expiry = new Date(Date.now() + (parseInt(process.env.OTP_EXPIRY_MINUTES) || 5) * 60 * 1000);
 
     const otpRecord = await Otp.create({
@@ -31,17 +67,23 @@ export const requestOtp = async (req, res, next) => {
       expiresAt: expiry
     });
 
-    if (!isProduction) {
-      console.log(`[OTP] Test OTP issued for ${mobile}: ${otpCode} (otpId: ${otpRecord.otpId})`);
+    // The OTP value itself is only ever logged under the explicit dev flag
+    // (review-account codes are never logged at all).
+    if (reviewOtp) {
+      console.log(`[OTP] Review-account OTP issued for ${mobile} (otpId: ${otpRecord.otpId})`);
+    } else if (devOtp) {
+      console.log(`[OTP] DEV OTP issued for ${mobile}: ${otpCode} (otpId: ${otpRecord.otpId})`);
     } else {
       console.log(`[OTP] Generated for ${mobile} (otpId: ${otpRecord.otpId})`);
     }
 
-    // Return format matching UserModel
+    // Return format matching UserModel. The OTP is never part of the
+    // response except under the dev flag (handy for local emulators).
     return res.status(200).json({
       id: otpRecord.otpId,
       name: user.firstName || null,
-      email: user.email || null
+      email: user.email || null,
+      ...(devOtp ? { devOtp: otpCode } : {})
     });
   } catch (error) {
     next(error);
