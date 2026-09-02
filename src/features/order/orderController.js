@@ -4,8 +4,8 @@ import { Business, Order, Product, Address, User } from '../../models/index.js';
 import { resolveBusiness } from '../../utils/helpers.js';
 import { sendToUser } from '../../utils/notify.js';
 import { notifyMerchant } from '../../utils/websocket.js';
-import { verifyPaymentSignature } from '../../config/razorpay.js';
-import { resolveCouponDiscount } from '../coupon/couponController.js';
+import { verifyPaymentSignature, getRazorpay } from '../../config/razorpay.js';
+import { computeOrderTotals, toPaise, PricingError } from './pricing.js';
 import {
   ALL_STATUSES,
   OrderStatus,
@@ -151,13 +151,12 @@ export const createOrder = async (req, res, next) => {
     if (!business) {
       return res.status(404).json({ error: { message: 'Business not found' } });
     }
+    // Money is NEVER read from the request. Any amount/price/total the client
+    // sends (including per-item price/total) is dropped by this schema and the
+    // whole bill is recomputed from DB prices in computeOrderTotals().
     const schema = z.object({
-      customerName: z.string(),
-      // Pre-coupon, pre-tip subtotal+fees total, as displayed at checkout.
-      // The final charged amount is recomputed below from this plus a
-      // server-verified coupon discount and tip — never trusted as-is.
-      amount: z.union([z.number(), z.string()]).transform(val => parseFloat(val) || 0),
-      items: z.array(z.any()),
+      customerName: z.string().min(1).max(120),
+      items: z.array(z.any()).min(1, 'At least one item is required.'),
       addressId: z.string().optional().nullable(),
       deliveryAddress: z.any().optional().nullable(),
       // Optional online-payment proof (Razorpay). Absent => Cash on Delivery.
@@ -165,46 +164,66 @@ export const createOrder = async (req, res, next) => {
       razorpayPaymentId: z.string().optional().nullable(),
       razorpaySignature: z.string().optional().nullable(),
       couponCode: z.string().optional().nullable(),
-      tipAmount: z.union([z.number(), z.string()]).optional().transform(v => Math.max(0, parseFloat(v) || 0)),
+      tipAmount: z.union([z.number(), z.string()]).optional().nullable(),
       noPlasticBag: z.boolean().optional(),
       deliveryInstructions: z.string().max(300).optional().nullable()
     });
     const data = schema.parse(req.body);
 
-    // Coupon discount is never taken from the client — recompute it here
-    // against the same rules /consumer/coupons/validate uses, so a tampered
-    // "discountAmount" in the request body has no effect.
-    let couponDiscount = 0;
-    if (data.couponCode) {
-      const result = await resolveCouponDiscount({
-        code: data.couponCode,
-        userId: req.user ? req.user.id : null,
+    let totals;
+    try {
+      totals = await computeOrderTotals({
+        items: data.items,
+        couponCode: data.couponCode,
+        tipAmount: data.tipAmount,
         businessId: business.id,
-        subtotal: data.amount,
+        userId: req.user ? req.user.id : null,
       });
-      if (!result.ok) {
-        return res.status(400).json({ error: { message: result.message } });
+    } catch (err) {
+      if (err instanceof PricingError) {
+        return res.status(err.status).json({ error: { message: err.message, code: err.code } });
       }
-      couponDiscount = result.discount;
+      throw err;
     }
-    const tipAmount = data.tipAmount || 0;
-    const finalAmount = Math.max(0, data.amount - couponDiscount + tipAmount);
+    const finalAmount = totals.finalAmount;
 
-    // Resolve payment: if Razorpay proof is supplied, verify the signature;
-    // reject the order if verification fails. Otherwise treat as COD.
+    // Resolve payment: if Razorpay proof is supplied, verify the signature AND
+    // that the Razorpay order was created (by us) for exactly this amount,
+    // this user and this cart. Otherwise treat as COD.
     let paymentMethod = 'cod';
     let paymentStatus = 'COD';
     let paymentId = null;
     let paymentOrderId = null;
-    if (data.razorpayPaymentId && data.razorpayOrderId && data.razorpaySignature) {
+    const hasPaymentProof = data.razorpayPaymentId || data.razorpayOrderId || data.razorpaySignature;
+    if (hasPaymentProof) {
+      if (!(data.razorpayPaymentId && data.razorpayOrderId && data.razorpaySignature)) {
+        return res.status(400).json({ error: { message: 'Incomplete payment details.', code: 'PAYMENT_PROOF_INCOMPLETE' } });
+      }
       const ok = verifyPaymentSignature({
         orderId: data.razorpayOrderId,
         paymentId: data.razorpayPaymentId,
         signature: data.razorpaySignature
       });
       if (!ok) {
-        return res.status(400).json({ error: { message: 'Payment verification failed.' } });
+        return res.status(400).json({ error: { message: 'Payment verification failed.', code: 'PAYMENT_SIGNATURE_INVALID' } });
       }
+
+      // A Razorpay order id can back exactly one store order.
+      const reused = await Order.findOne({ where: { paymentOrderId: data.razorpayOrderId } });
+      if (reused) {
+        return res.status(409).json({ error: { message: 'This payment has already been used for an order.', code: 'PAYMENT_ALREADY_USED' } });
+      }
+
+      const mismatch = await verifyPaidAmount({
+        razorpayOrderId: data.razorpayOrderId,
+        expectedAmount: finalAmount,
+        expectedUserId: req.user ? req.user.id : null,
+        expectedFingerprint: totals.fingerprint,
+      });
+      if (mismatch) {
+        return res.status(mismatch.status).json({ error: { message: mismatch.message, code: mismatch.code } });
+      }
+
       paymentMethod = 'razorpay';
       paymentStatus = 'PAID';
       paymentId = data.razorpayPaymentId;
@@ -229,28 +248,24 @@ export const createOrder = async (req, res, next) => {
       if (addr) deliveryAddress = addr.toJSON();
     }
 
-    // Verify stock levels first
-    for (const item of data.items) {
-      if (item.productId) {
-        const prod = await Product.findByPk(item.productId);
-        if (prod) {
-          if (prod.inventoryCount < item.qty) {
-            return res.status(400).json({ error: { message: `Insufficient stock for ${prod.productName} (only ${prod.inventoryCount} left)` } });
-          }
-        }
+    // Stock was verified inside computeOrderTotals; decrement it now.
+    for (const line of totals.items) {
+      const prod = await Product.findByPk(line.productId);
+      if (prod) {
+        prod.inventoryCount = Math.max(0, prod.inventoryCount - line.quantity);
+        await prod.save();
       }
     }
 
-    // Decrement stock for all items
-    for (const item of data.items) {
-      if (item.productId) {
-        const prod = await Product.findByPk(item.productId);
-        if (prod) {
-          prod.inventoryCount -= item.qty;
-          await prod.save();
-        }
-      }
-    }
+    // Persist the server-priced lines in the shape the merchant UI/billing
+    // already read ({ name, price, qty, total }) plus productId.
+    const storedItems = totals.items.map((l) => ({
+      productId: l.productId,
+      name: l.name,
+      price: l.unitPrice,
+      qty: l.quantity,
+      total: l.lineTotal
+    }));
 
     const orderCode = `ORD-${Math.floor(100000 + Math.random() * 900000)}`;
     const date = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -263,15 +278,23 @@ export const createOrder = async (req, res, next) => {
       status: OrderStatus.PENDING,
       statusHistory: [{ status: OrderStatus.PENDING, by: 'customer', at: new Date().toISOString() }],
       date,
-      items: data.items,
+      items: storedItems,
       deliveryAddress,
       paymentMethod,
       paymentStatus,
       paymentId,
       paymentOrderId,
-      couponCode: data.couponCode || null,
-      couponDiscount,
-      tipAmount,
+      couponCode: totals.couponCode,
+      couponDiscount: totals.couponDiscount,
+      tipAmount: totals.tipAmount,
+      pricing: {
+        subtotal: totals.subtotal,
+        fees: totals.fees,
+        preCouponAmount: totals.preCouponAmount,
+        couponDiscount: totals.couponDiscount,
+        tipAmount: totals.tipAmount,
+        finalAmount: totals.finalAmount
+      },
       noPlasticBag: data.noPlasticBag || false,
       deliveryInstructions: data.deliveryInstructions || null
     });
@@ -281,7 +304,7 @@ export const createOrder = async (req, res, next) => {
       sendToUser(
         business.ownerId,
         `New order ${orderCode}`,
-        `${data.customerName} placed an order worth ₹${finalAmount}.`,
+        `${data.customerName} placed an order worth ₹${finalAmount.toFixed(2)}.`,
         { type: 'new_order', orderId: newOrder.id }
       );
     }
@@ -297,6 +320,47 @@ export const createOrder = async (req, res, next) => {
     next(error);
   }
 };
+
+/**
+ * Confirms, against Razorpay's own record, that the order the customer paid
+ * was created for the amount we just recomputed (and for this user/cart, via
+ * the notes we attached in POST /payment/order). Fails closed: if Razorpay
+ * cannot be reached the order is not accepted as paid.
+ * Returns null when everything matches, else { status, code, message }.
+ */
+async function verifyPaidAmount({ razorpayOrderId, expectedAmount, expectedUserId, expectedFingerprint }) {
+  const rzp = await getRazorpay();
+  if (!rzp) {
+    return { status: 503, code: 'PAYMENTS_DISABLED', message: 'Online payments are not configured.' };
+  }
+  let rzpOrder;
+  try {
+    rzpOrder = await rzp.orders.fetch(razorpayOrderId);
+  } catch (err) {
+    console.error('[Payment] Could not fetch Razorpay order for verification:', err?.error?.description || err.message);
+    return { status: 502, code: 'PAYMENT_VERIFY_UNAVAILABLE', message: 'Could not verify the payment with the gateway. Please try again.' };
+  }
+
+  const expectedPaise = toPaise(expectedAmount);
+  if (Number(rzpOrder.amount) !== expectedPaise || (rzpOrder.currency && rzpOrder.currency !== 'INR')) {
+    console.warn(`[Payment] Amount mismatch on ${razorpayOrderId}: paid ${rzpOrder.amount} paise, order total ${expectedPaise} paise`);
+    return { status: 400, code: 'PAYMENT_AMOUNT_MISMATCH', message: 'The amount paid does not match the order total. Please contact support.' };
+  }
+  const notes = rzpOrder.notes || {};
+  if (expectedUserId && notes.userId && notes.userId !== String(expectedUserId)) {
+    return { status: 400, code: 'PAYMENT_USER_MISMATCH', message: 'This payment does not belong to your account.' };
+  }
+  if (notes.cartFingerprint && expectedFingerprint && notes.cartFingerprint !== expectedFingerprint) {
+    return { status: 400, code: 'PAYMENT_CART_MISMATCH', message: 'Your cart changed after payment. Please contact support.' };
+  }
+  // Razorpay marks the order 'paid' once the payment is captured. With
+  // manual capture it can still be 'attempted' at this point, so only reject
+  // states that can never lead to money: 'created' means no payment attempt.
+  if (rzpOrder.status === 'created') {
+    return { status: 400, code: 'PAYMENT_NOT_ATTEMPTED', message: 'No payment was received for this order.' };
+  }
+  return null;
+}
 
 export const getConsumerOrders = async (req, res, next) => {
   try {
