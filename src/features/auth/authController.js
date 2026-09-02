@@ -9,12 +9,30 @@ const generateOTP = () => {
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 };
 
-// The fixed dev OTP (DEV_OTP, default '200310') is only issued when BOTH hold:
-// the operator opted in with ALLOW_DEV_OTP=true AND the process is not
-// running as production. A missing/mistyped NODE_ENV alone can no longer
-// turn it on.
+// The fixed dev OTP (DEV_OTP, default '200310') is issued when the operator
+// opted in with ALLOW_DEV_OTP=true AND the process is not production.
+//
+// TEMPORARY LAUNCH BRIDGE: until an SMS provider is integrated, production
+// has no way to deliver real OTPs, so the operator may ALSO set
+// ALLOW_DEV_OTP_IN_PRODUCTION=true to keep the fixed code working there.
+// While that flag is on, anyone who knows the code can enter ANY account —
+// remove it (and ALLOW_DEV_OTP) the moment SMS delivery exists.
 const isDevOtpEnabled = () =>
-  process.env.ALLOW_DEV_OTP === 'true' && process.env.NODE_ENV !== 'production';
+  process.env.ALLOW_DEV_OTP === 'true' &&
+  (process.env.NODE_ENV !== 'production' ||
+    process.env.ALLOW_DEV_OTP_IN_PRODUCTION === 'true');
+
+if (
+  process.env.NODE_ENV === 'production' &&
+  process.env.ALLOW_DEV_OTP === 'true' &&
+  process.env.ALLOW_DEV_OTP_IN_PRODUCTION === 'true'
+) {
+  console.warn(
+    '[SECURITY] Fixed dev OTP is ENABLED IN PRODUCTION for all accounts ' +
+      '(ALLOW_DEV_OTP_IN_PRODUCTION=true). This is a temporary bridge until ' +
+      'SMS integration — remove both flags before public launch.'
+  );
+}
 
 // The fixed code issued to EVERY account while the dev flag is on.
 // Configurable so the team can rotate it without a code change.
