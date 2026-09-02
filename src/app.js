@@ -21,6 +21,11 @@ import { CATEGORY_SEED } from './config/categories.js';
 
 // Initialize App
 const app = express();
+// Behind the reverse proxy (nginx) the client IP arrives in X-Forwarded-For.
+// Trusting exactly one hop lets express-rate-limit key on the real client IP
+// instead of lumping every user into the proxy's single bucket (and clears
+// its ERR_ERL_UNEXPECTED_X_FORWARDED_FOR error).
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 8080;
 
 // Security and utility Middlewares
