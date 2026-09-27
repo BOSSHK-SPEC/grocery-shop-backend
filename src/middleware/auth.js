@@ -16,6 +16,18 @@ export const authGuard = async (req, res, next) => {
       return res.status(401).json({ error: { message: 'User not found or session expired.' } });
     }
 
+    // A suspension has to bite on the next request, not whenever the current
+    // access token happens to run out. Checked here (and at login) so there
+    // is no window in which a suspended account keeps calling the API.
+    if (user.status === 'SUSPENDED') {
+      return res.status(403).json({
+        error: {
+          message: 'This account has been suspended. Contact support for help.',
+          code: 'ACCOUNT_SUSPENDED'
+        }
+      });
+    }
+
     req.user = user;
     req.userRole = decoded.role;
     next();

@@ -1,7 +1,8 @@
 import crypto from 'crypto';
 import { z } from 'zod';
 import { User, Otp, Address, Tenant } from '../../models/index.js';
-import { saveBase64Image } from '../../utils/helpers.js';
+import { discardImages, presentUserMisc, resolveImageInput } from '../../storage/imageStorage.js';
+import { ModeStatus, legacyFieldsForApplication, modesOf, withModeStatus } from '../../utils/modes.js';
 import { signAccessToken, issueRefreshToken, rotateRefreshToken, revokeRefreshToken } from '../../utils/tokens.js';
 
 // Generates a 6-digit OTP from a CSPRNG (Math.random is predictable).
@@ -61,12 +62,96 @@ const reviewOtpFor = (mobile) => {
     : null;
 };
 
+// ── Request validation ──────────────────────────────────────────────────
+// A bare z.string() accepts '' and 'abcdefghij'. Both used to pass schema
+// validation, miss the OTP row lookup, and come back to the client as the
+// misleading "Invalid or expired OTP." — which sent everyone hunting the
+// wrong bug when the client dropped the phone number. Validate the shape
+// here instead, and say which field is actually wrong.
+//
+// The value is normalized to digits (clients may send spaces or a leading
+// '+'), the same normalization middleware/rateLimit.js already applies.
+const mobileField = z
+  .string({ required_error: 'Mobile number is required.' })
+  .transform((v) => v.replace(/[^0-9]/g, ''))
+  .refine((v) => v.length >= 10 && v.length <= 15, {
+    message: 'A valid 10-15 digit mobile number is required.'
+  });
+
+const otpField = z
+  .string({ required_error: 'OTP is required.' })
+  .trim()
+  .regex(/^[0-9]{6}$/, 'Enter the 6-digit code.');
+
+// otpId is always a UUID we issued. Checking it here also keeps a malformed
+// value out of the UUID column in the WHERE clause.
+const otpIdField = z
+  .string({ required_error: 'Verification session is required.' })
+  .uuid('Your verification session is invalid. Please request a new code.');
+
+const badRequest = (res, message, code) =>
+  res.status(400).json({ error: { message, code } });
+
+// Pulls the first validation failure out of a safeParse result as a
+// { message, code } pair the client can both show and branch on.
+const firstIssue = (error, codes) => {
+  const issue = error.errors?.[0];
+  const field = issue?.path?.[0];
+  return {
+    message: issue?.message || 'Invalid request.',
+    code: codes[field] || 'INVALID_REQUEST'
+  };
+};
+
+// ── Per-OTP attempt lockout ─────────────────────────────────────────────
+// authLimiter caps how often one IP may call these endpoints, but a
+// distributed caller could still walk the million possible codes for a
+// single otpId. Cap the wrong guesses against each issued code.
+//
+// In-memory on purpose, matching otpPhoneLimiter: there is no Redis in this
+// deployment and the app runs as a single pm2 process, so a restart clearing
+// the counters is an acceptable failure mode for a throttle.
+const OTP_MAX_ATTEMPTS = parseInt(process.env.OTP_MAX_ATTEMPTS, 10) > 0
+  ? parseInt(process.env.OTP_MAX_ATTEMPTS, 10)
+  : 5;
+const OTP_ATTEMPT_TTL_MS = 15 * 60 * 1000;
+const otpAttempts = new Map(); // otpId -> { count, expiresAt }
+
+const isOtpLockedOut = (otpId) => {
+  const entry = otpAttempts.get(otpId);
+  if (!entry || entry.expiresAt <= Date.now()) return false;
+  return entry.count >= OTP_MAX_ATTEMPTS;
+};
+
+const registerFailedAttempt = (otpId) => {
+  const now = Date.now();
+  // Opportunistic prune keeps the map from growing unbounded.
+  for (const [key, entry] of otpAttempts) {
+    if (entry.expiresAt <= now) otpAttempts.delete(key);
+  }
+  const entry = otpAttempts.get(otpId) || { count: 0, expiresAt: now + OTP_ATTEMPT_TTL_MS };
+  entry.count += 1;
+  otpAttempts.set(otpId, entry);
+};
+
+const clearAttempts = (otpId) => otpAttempts.delete(otpId);
+
+const lockedOutResponse = (res) =>
+  res.status(429).json({
+    error: {
+      message: 'Too many incorrect attempts. Please request a new code.',
+      code: 'OTP_ATTEMPTS_EXCEEDED'
+    }
+  });
+
 export const requestOtp = async (req, res, next) => {
   try {
-    const schema = z.object({
-      mobile: z.string().min(10).max(15)
-    });
-    const { mobile } = schema.parse(req.body);
+    const parsed = z.object({ mobile: mobileField }).safeParse(req.body);
+    if (!parsed.success) {
+      const { message, code } = firstIssue(parsed.error, { mobile: 'INVALID_MOBILE' });
+      return badRequest(res, message, code);
+    }
+    const { mobile } = parsed.data;
 
     // Create user if not exists
     let user = await User.findOne({ where: { mobileNumber: mobile } });
@@ -79,29 +164,45 @@ export const requestOtp = async (req, res, next) => {
     const otpCode = reviewOtp || (devOtp ? DEV_OTP : generateOTP());
     const expiry = new Date(Date.now() + (parseInt(process.env.OTP_EXPIRY_MINUTES) || 5) * 60 * 1000);
 
+    // Issuing a new code retires every code still outstanding for this
+    // number, so only the most recently sent one can ever be used.
+    await Otp.update(
+      { status: 'SUPERSEDED' },
+      { where: { mobileNumber: mobile, status: 'PENDING' } }
+    );
+
     const otpRecord = await Otp.create({
       mobileNumber: mobile,
       otp: otpCode,
       expiresAt: expiry
     });
 
-    // The OTP value itself is only ever logged under the explicit dev flag
-    // (review-account codes are never logged at all).
-    if (reviewOtp) {
-      console.log(`[OTP] Review-account OTP issued for ${mobile} (otpId: ${otpRecord.otpId})`);
-    } else if (devOtp) {
-      console.log(`[OTP] DEV OTP issued for ${mobile}: ${otpCode} (otpId: ${otpRecord.otpId})`);
+    // The code never appears in a production log: these ship to shared
+    // aggregators, so a plaintext OTP there is a standing account-takeover
+    // path. Outside production it IS logged, because that is how local and
+    // staging testing works without an SMS provider.
+    //
+    // Review-account codes are never logged in any environment: they are
+    // long-lived and shared with app-store reviewers, so the only copies
+    // live with the operator and in the store's review form.
+    if (reviewOtp || process.env.NODE_ENV === 'production') {
+      console.log(`[OTP] Issued for ${mobile} (otpId: ${otpRecord.otpId})`);
     } else {
-      console.log(`[OTP] Generated for ${mobile} (otpId: ${otpRecord.otpId})`);
+      console.log(
+        `[OTP] Issued for ${mobile}: ${otpCode} (otpId: ${otpRecord.otpId})` +
+          (devOtp ? ' [fixed DEV_OTP]' : '')
+      );
     }
 
-    // Return format matching UserModel. The OTP is never part of the
-    // response except under the dev flag (handy for local emulators).
+    // Return format matching UserModel. The OTP is NEVER part of the
+    // response in any environment: /api/otp is unauthenticated, so anyone
+    // who can name a phone number could otherwise read that account's code
+    // straight out of the JSON and log in as them. Local testing reads the
+    // code from the server log above instead.
     return res.status(200).json({
       id: otpRecord.otpId,
       name: user.firstName || null,
-      email: user.email || null,
-      ...(devOtp ? { devOtp: otpCode } : {})
+      email: user.email || null
     });
   } catch (error) {
     next(error);
@@ -110,25 +211,43 @@ export const requestOtp = async (req, res, next) => {
 
 export const verifyOtp = async (req, res, next) => {
   try {
-    const schema = z.object({
-      otp: z.string(),
-      otpId: z.string(),
-      mobileNumber: z.string()
-    });
-    const { otp, otpId, mobileNumber } = schema.parse(req.body);
+    const parsed = z
+      .object({ otp: otpField, otpId: otpIdField, mobileNumber: mobileField })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      const { message, code } = firstIssue(parsed.error, {
+        mobileNumber: 'INVALID_MOBILE',
+        otp: 'INVALID_OTP',
+        otpId: 'INVALID_OTP_SESSION'
+      });
+      return badRequest(res, message, code);
+    }
+    const { otp, otpId, mobileNumber } = parsed.data;
+
+    if (isOtpLockedOut(otpId)) return lockedOutResponse(res);
 
     const otpRecord = await Otp.findOne({
       where: { otpId, mobileNumber, otp, status: 'PENDING' }
     });
 
     if (!otpRecord || otpRecord.expiresAt < new Date()) {
-      return res.status(400).json({ error: { message: 'Invalid or expired OTP.' } });
+      registerFailedAttempt(otpId);
+      return res.status(400).json({ error: { message: 'Invalid or expired OTP.', code: 'OTP_INVALID' } });
+    }
+
+    const user = await User.findOne({ where: { mobileNumber } });
+    // The OTP row can outlive its user (account deleted mid-flow). Answer
+    // 404 rather than dereferencing null and returning a 500.
+    if (!user) {
+      return res.status(404).json({
+        error: { message: 'No account found for this mobile number.', code: 'USER_NOT_FOUND' }
+      });
     }
 
     otpRecord.status = 'VERIFIED';
     await otpRecord.save();
+    clearAttempts(otpId);
 
-    const user = await User.findOne({ where: { mobileNumber } });
     const adminMobile = process.env.ADMIN_MOBILE || '9000000000';
     if (mobileNumber === adminMobile) {
       user.role = 'admin';
@@ -150,32 +269,59 @@ export const verifyOtp = async (req, res, next) => {
 
 export const login = async (req, res, next) => {
   try {
-    const schema = z.object({
-      mobile: z.string(),
-      otpId: z.string(),
-      otp: z.string(),
-      role: z.enum(['merchant', 'consumer', 'delivery', 'admin', 'super_admin']).optional()
-    });
-    const { mobile, otpId, otp, role: selectedRole } = schema.parse(req.body);
-
-    // Validate the OTP
-    const otpRecord = await Otp.findOne({
-      where: { otpId, mobileNumber: mobile, otp, status: 'VERIFIED' }
-    });
-
-    if (!otpRecord) {
-      // Fallback: Check if OTP exists and is valid (if verifyOtp wasn't called separately)
-      const pendingOtp = await Otp.findOne({
-        where: { otpId, mobileNumber: mobile, otp, status: 'PENDING' }
+    const parsed = z
+      .object({
+        mobile: mobileField,
+        otpId: otpIdField,
+        otp: otpField,
+        role: z.enum(['merchant', 'consumer', 'delivery', 'admin', 'super_admin']).optional()
+      })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      const { message, code } = firstIssue(parsed.error, {
+        mobile: 'INVALID_MOBILE',
+        otp: 'INVALID_OTP',
+        otpId: 'INVALID_OTP_SESSION'
       });
-      if (!pendingOtp || new Date(pendingOtp.expiresAt).getTime() < Date.now()) {
-        return res.status(400).json({ error: { message: 'Invalid or expired OTP.' } });
-      }
-      pendingOtp.status = 'VERIFIED';
-      await pendingOtp.save();
+      return badRequest(res, message, code);
+    }
+    const { mobile, otpId, otp, role: selectedRole } = parsed.data;
+
+    if (isOtpLockedOut(otpId)) return lockedOutResponse(res);
+
+    // One lookup for both paths: a code /otp/valid already verified, and a
+    // still-pending code when the client logs in without that extra call.
+    // Expiry is checked for both — a VERIFIED row used to be accepted
+    // forever, so a code verified once stayed a valid login credential.
+    const otpRecord = await Otp.findOne({
+      where: { otpId, mobileNumber: mobile, otp, status: ['VERIFIED', 'PENDING'] }
+    });
+
+    if (!otpRecord || new Date(otpRecord.expiresAt).getTime() < Date.now()) {
+      registerFailedAttempt(otpId);
+      return res.status(400).json({ error: { message: 'Invalid or expired OTP.', code: 'OTP_INVALID' } });
     }
 
     const user = await User.findOne({ where: { mobileNumber: mobile } });
+    // Guard before the `user.misc` dereference below: an OTP row can outlive
+    // its user, which used to throw and answer 500.
+    if (!user) {
+      return res.status(404).json({
+        error: { message: 'No account found for this mobile number.', code: 'USER_NOT_FOUND' }
+      });
+    }
+
+    // A suspended account must not be able to obtain a fresh token pair, or
+    // suspending someone would only last until their next login.
+    if (user.status === 'SUSPENDED') {
+      return res.status(403).json({
+        error: {
+          message: 'This account has been suspended. Contact support for help.',
+          code: 'ACCOUNT_SUSPENDED'
+        }
+      });
+    }
+
     const adminMobile = process.env.ADMIN_MOBILE || '9000000000';
     const superAdminMobile = process.env.SUPER_ADMIN_MOBILE || '9999999999';
 
@@ -226,6 +372,14 @@ export const login = async (req, res, next) => {
       await user.save();
     }
 
+    // Burn the code now that the login is certain to succeed: a replayed
+    // request with the same otpId can no longer mint a second session.
+    // The role-denied returns above deliberately leave it usable so the user
+    // can retry with the right role.
+    otpRecord.status = 'USED';
+    await otpRecord.save();
+    clearAttempts(otpId);
+
     const accessToken = signAccessToken({ userId: user.id, role });
     const { token: refreshToken } = await issueRefreshToken(user.id);
 
@@ -246,7 +400,7 @@ export const login = async (req, res, next) => {
         password: user.password,
         language: user.language,
         status: user.status,
-        misc: user.misc
+        misc: await presentUserMisc(user.misc)
       }
     });
   } catch (error) {
@@ -323,14 +477,26 @@ export const onboardConsumer = async (req, res, next) => {
     user.lastName = lastName;
     user.status = 'ACTIVE';
 
+    // Stored reference, not the URL the getter returns.
+    const previousPic = user.getDataValue('profilePic');
+    let picChanged = false;
     if (profilePic) {
-      const picUrl = await saveBase64Image(profilePic);
-      if (picUrl) {
-        user.profilePic = picUrl;
-      }
+      const picRef = await resolveImageInput(profilePic, {
+        purpose: 'profile_picture',
+        userId: user.id,
+        current: previousPic,
+      });
+      picChanged = picRef !== previousPic;
+      user.profilePic = picRef;
     }
 
-    await user.save();
+    try {
+      await user.save();
+    } catch (error) {
+      if (picChanged) await discardImages(user.getDataValue('profilePic'));
+      throw error;
+    }
+    if (picChanged) await discardImages(previousPic);
 
     // Create or update the user's default address
     let address = await Address.findOne({
@@ -364,6 +530,15 @@ export const onboardConsumer = async (req, res, next) => {
   }
 };
 
+/** GET /auth/me/modes — which modes this account can use (see utils/modes.js). */
+export const getMyModes = async (req, res, next) => {
+  try {
+    return res.status(200).json({ modes: modesOf(req.user) });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const getConsumerProfile = async (req, res, next) => {
   try {
     const user = req.user;
@@ -381,8 +556,9 @@ export const getConsumerProfile = async (req, res, next) => {
         email: user.email,
         role: user.role,
         status: user.status,
-        misc: user.misc
+        misc: await presentUserMisc(user.misc)
       },
+      modes: modesOf(user),
       address
     });
   } catch (error) {
@@ -409,37 +585,76 @@ export const onboardDelivery = async (req, res, next) => {
     const schema = z.object({
       firstName: z.string(),
       lastName: z.string(),
-      bikeRegNumber: z.string(),
+      // Bicycles need neither a registration number nor a licence.
+      vehicleType: z.enum(['motorbike', 'scooter', 'electric_scooter', 'bicycle']).default('motorbike'),
+      bikeRegNumber: z.string().trim().optional().nullable(),
       dlPic: z.string().optional().nullable(),
       tenantId: z.string().optional().nullable(),
       address: addressSchema
     });
 
-    const { firstName, lastName, bikeRegNumber, dlPic, tenantId, address: addressData } = schema.parse(req.body);
+    const { firstName, lastName, vehicleType, bikeRegNumber, dlPic, tenantId, address: addressData } = schema.parse(req.body);
     const user = req.user;
+    const motorised = vehicleType !== 'bicycle';
+    if (motorised && !bikeRegNumber) {
+      return res.status(400).json({
+        error: { message: 'A vehicle registration number is required for motor vehicles.', code: 'REG_REQUIRED' }
+      });
+    }
 
     user.firstName = firstName;
     user.lastName = lastName;
-    user.status = 'PENDING_APPROVAL';
-    user.role = 'delivery';
+    // Tracked on its own (misc.modes.delivering): applying to deliver never
+    // demotes or locks out an account that already sells.
+    const legacy = legacyFieldsForApplication(user, 'delivering');
+    user.status = legacy.status;
+    user.role = legacy.role;
     if (tenantId && tenantId !== 'standalone') {
       user.tenantId = tenantId;
     } else {
       user.tenantId = null;
     }
 
-    let dlPicUrl = null;
-    if (dlPic) {
-      dlPicUrl = await saveBase64Image(dlPic);
+    const previousDlPic = user.misc?.dlPic || null;
+    const dlPicUrl = dlPic
+      ? await resolveImageInput(dlPic, {
+          purpose: 'driving_licence',
+          userId: user.id,
+          current: previousDlPic,
+        })
+      : null;
+    const dlChanged = Boolean(dlPicUrl) && dlPicUrl !== previousDlPic;
+
+    // A rider must end up with a licence on file. Checked against the merged
+    // result rather than the request body, so re-saving a profile that already
+    // has one keeps working without re-uploading — the app omits dlPic when it
+    // is unchanged. Enforced here and not only in the app: this is a compliance
+    // record, and a client-side check alone is something a modified client can
+    // simply skip.
+    const finalDlPic = dlPicUrl || user.misc?.dlPic || '';
+    if (motorised && !finalDlPic) {
+      return res.status(400).json({
+        error: {
+          message: 'A driving licence photo is required to register as a delivery partner.',
+          code: 'DL_REQUIRED'
+        }
+      });
     }
 
-    user.misc = {
-      ...user.misc,
-      bikeRegNumber,
-      dlPic: dlPicUrl || user.misc?.dlPic || ''
-    };
+    user.misc = withModeStatus(
+      { ...user.misc, bikeRegNumber: motorised ? bikeRegNumber : null, dlPic: finalDlPic || null },
+      'delivering',
+      ModeStatus.PENDING,
+      { vehicleType }
+    );
 
-    await user.save();
+    try {
+      await user.save();
+    } catch (error) {
+      if (dlChanged) await discardImages(dlPicUrl);
+      throw error;
+    }
+    if (dlChanged) await discardImages(previousDlPic);
 
     let address = await Address.findOne({ where: { userId: user.id } });
     if (address) {
@@ -461,7 +676,7 @@ export const onboardDelivery = async (req, res, next) => {
         profilePic: user.profilePic,
         role: user.role,
         status: user.status,
-        misc: user.misc
+        misc: await presentUserMisc(user.misc)
       },
       address
     });
@@ -498,24 +713,40 @@ export const getTenantsPublic = async (req, res, next) => {
 /** Verified 2-Step OTP Account Deletion */
 export const deleteAccount = async (req, res, next) => {
   try {
-    const schema = z.object({
-      mobileNumber: z.string().min(10),
-      otpId: z.string(),
-      otp: z.string(),
-      reason: z.string().optional()
-    });
-    const { mobileNumber, otpId, otp, reason } = schema.parse(req.body);
+    const parsed = z
+      .object({
+        mobileNumber: mobileField,
+        otpId: otpIdField,
+        otp: otpField,
+        reason: z.string().max(500).optional()
+      })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      const { message, code } = firstIssue(parsed.error, {
+        mobileNumber: 'INVALID_MOBILE',
+        otp: 'INVALID_OTP',
+        otpId: 'INVALID_OTP_SESSION'
+      });
+      return badRequest(res, message, code);
+    }
+    const { mobileNumber, otpId, otp, reason } = parsed.data;
+
+    if (isOtpLockedOut(otpId)) return lockedOutResponse(res);
 
     const otpRecord = await Otp.findOne({
       where: { otpId, mobileNumber, otp, status: 'PENDING' }
     });
 
     if (!otpRecord || otpRecord.expiresAt < new Date()) {
-      return res.status(400).json({ error: { message: 'Invalid or expired OTP.' } });
+      registerFailedAttempt(otpId);
+      return res.status(400).json({ error: { message: 'Invalid or expired OTP.', code: 'OTP_INVALID' } });
     }
 
-    otpRecord.status = 'VERIFIED';
+    // Deleting an account is irreversible, so the code is single-use here
+    // too: USED, not VERIFIED, so a replay cannot re-enter this handler.
+    otpRecord.status = 'USED';
     await otpRecord.save();
+    clearAttempts(otpId);
 
     const user = await User.findOne({ where: { mobileNumber } });
     if (user) {
@@ -533,3 +764,45 @@ export const deleteAccount = async (req, res, next) => {
     next(error);
   }
 };
+
+export const updateProfile = async (req, res, next) => {
+  try {
+    const schema = z.object({
+      firstName: z.string().optional(),
+      lastName: z.string().optional(),
+      email: z.string().email().optional().nullable(),
+      profilePic: z.string().optional().nullable(),
+    });
+    const data = schema.parse(req.body);
+    const user = req.user;
+
+    if (data.firstName !== undefined) user.firstName = data.firstName;
+    if (data.lastName !== undefined) user.lastName = data.lastName;
+    if (data.email !== undefined) user.email = data.email;
+    if (data.profilePic !== undefined && data.profilePic !== null) {
+      const pic = await resolveImageInput(data.profilePic, {
+        purpose: 'profile_picture',
+        userId: user.id
+      });
+      user.profilePic = pic;
+    }
+    await user.save();
+
+    return res.status(200).json({
+      owner: {
+        id: user.id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        mobileNumber: user.mobileNumber,
+        profilePic: user.profilePic,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        misc: await presentUserMisc(user.misc)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+

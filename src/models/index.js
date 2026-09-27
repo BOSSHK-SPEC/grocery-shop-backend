@@ -16,6 +16,8 @@ import { Complaint } from './Complaint.js';
 import { RefreshToken } from './RefreshToken.js';
 import { Favorite } from './Favorite.js';
 import { Coupon } from './Coupon.js';
+import { AuditLog } from './AuditLog.js';
+import { UploadIntent } from './UploadIntent.js';
 
 // Setup Relationships
 
@@ -111,5 +113,7 @@ export {
   Complaint,
   RefreshToken,
   Favorite,
-  Coupon
+  Coupon,
+  AuditLog,
+  UploadIntent
 };

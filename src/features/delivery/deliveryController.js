@@ -1,7 +1,9 @@
 import { z } from 'zod';
-import { Order, User, Business, Address, ChatMessage, Rating, Complaint } from '../../models/index.js';
+import { Order, User, Business, Address, ChatMessage, Rating, Complaint, sequelize } from '../../models/index.js';
 import { OrderStatus } from '../order/orderStatus.js';
 import { sendToUser } from '../../utils/notify.js';
+import { publishOrderChanged, onRiderLocation, loadOrderForTracking, roleOnOrder } from '../tracking/trackingService.js';
+import { getRiderLocation } from '../tracking/trackingHub.js';
 
 /**
  * Notify BOTH parties of an order (customer + store owner) about a delivery
@@ -19,6 +21,17 @@ async function notifyOrderParties(order, title, body) {
   }
 }
 
+function deduplicateOrders(list) {
+  const seen = new Set();
+  const result = [];
+  for (const o of list || []) {
+    if (seen.has(o.id)) continue;
+    seen.add(o.id);
+    result.push(o);
+  }
+  return result;
+}
+
 export const getAvailableDeliveries = async (req, res, next) => {
   try {
     const orders = await Order.findAll({
@@ -31,7 +44,8 @@ export const getAvailableDeliveries = async (req, res, next) => {
         {
           model: User,
           as: 'customer',
-          attributes: ['id', 'firstName', 'lastName', 'mobileNumber'],
+          // No phone number until a rider has claimed the order.
+          attributes: ['id', 'firstName'],
           include: [{ model: Address, as: 'address' }]
         },
         {
@@ -41,7 +55,7 @@ export const getAvailableDeliveries = async (req, res, next) => {
         }
       ]
     });
-    return res.status(200).json(orders);
+    return res.status(200).json(deduplicateOrders(orders));
   } catch (error) {
     next(error);
   }
@@ -65,11 +79,15 @@ export const getActiveDeliveries = async (req, res, next) => {
         {
           model: Business,
           attributes: ['id', 'businessName', 'businessCode', 'businessDp'],
-          include: [{ model: Address, as: 'address' }]
+          include: [
+            { model: Address, as: 'address' },
+            // The assigned rider may need to call the store about pickup.
+            { model: User, as: 'owner', attributes: ['firstName', 'mobileNumber'] }
+          ]
         }
       ]
     });
-    return res.status(200).json(orders);
+    return res.status(200).json(deduplicateOrders(orders));
   } catch (error) {
     next(error);
   }
@@ -97,48 +115,45 @@ export const getDeliveryHistory = async (req, res, next) => {
         }
       ]
     });
-    return res.status(200).json(orders);
+    return res.status(200).json(deduplicateOrders(orders));
   } catch (error) {
     next(error);
   }
 };
 
 export const claimDelivery = async (req, res, next) => {
+  const { id } = req.params;
+  let order;
   try {
-    const { id } = req.params;
-    const order = await Order.findByPk(id);
-    if (!order) {
-      return res.status(404).json({ error: { message: 'Order not found.' } });
-    }
-    if (order.status !== 'Packed') {
-      return res.status(400).json({ error: { message: 'Order is not ready for delivery.' } });
-    }
-    if (order.deliveryPartnerId) {
-      return res.status(400).json({ error: { message: 'Order is already claimed by another delivery partner.' } });
-    }
+    // The row lock serialises concurrent claims: the second rider waits,
+    // then sees the first rider's id and is refused.
+    order = await sequelize.transaction(async (transaction) => {
+      const row = await Order.findByPk(id, { transaction, lock: transaction.LOCK.UPDATE });
+      if (!row) return { error: 404, message: 'Order not found.' };
+      if (row.deliveryPartnerId === req.user.id) return { row, retry: true }; // idempotent retry
+      if (row.deliveryPartnerId) return { error: 409, code: 'ALREADY_CLAIMED', message: 'Order is already claimed by another delivery partner.' };
+      if (row.status !== 'Packed') return { error: 409, code: 'NOT_READY', message: 'Order is not ready for delivery.' };
 
-    order.deliveryPartnerId = req.user.id;
-    // Maintain audit trail
-    const statusHistory = Array.isArray(order.statusHistory) ? order.statusHistory : [];
-    statusHistory.push({
-      status: order.status,
-      by: 'delivery',
-      at: new Date().toISOString(),
-      note: 'Claimed by delivery partner'
+      row.deliveryPartnerId = req.user.id;
+      row.statusHistory = [
+        ...(Array.isArray(row.statusHistory) ? row.statusHistory : []),
+        { status: row.status, by: 'delivery', at: new Date().toISOString(), note: 'Claimed by delivery partner' }
+      ];
+      await row.save({ transaction });
+      return { row };
     });
-    order.statusHistory = statusHistory;
-    await order.save();
-
-    await notifyOrderParties(
-      order,
-      'Delivery partner assigned',
-      `A delivery partner has been assigned to order ${order.orderCode}.`
-    );
-
-    return res.status(200).json(order);
   } catch (error) {
-    next(error);
+    return next(error);
   }
+
+  if (order.error) {
+    return res.status(order.error).json({ error: { message: order.message, ...(order.code ? { code: order.code } : {}) } });
+  }
+  if (!order.retry) {
+    await notifyOrderParties(order.row, 'Delivery partner assigned', `A delivery partner has been assigned to order ${order.row.orderCode}.`);
+    publishOrderChanged(order.row.id);
+  }
+  return res.status(200).json(order.row);
 };
 
 export const startDelivery = async (req, res, next) => {
@@ -170,6 +185,7 @@ export const startDelivery = async (req, res, next) => {
       'Order picked up',
       `Order ${order.orderCode} has been collected and is out for delivery.`
     );
+    publishOrderChanged(order.id);
 
     return res.status(200).json(order);
   } catch (error) {
@@ -191,6 +207,15 @@ export const completeDelivery = async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Order cannot transition to Delivered from current status.' } });
     }
 
+    if (order.deliveryCode) {
+      const providedCode = String(req.body?.deliveryCode ?? req.body?.code ?? req.body?.otp ?? '').trim();
+      if (!providedCode || providedCode !== order.deliveryCode) {
+        return res.status(400).json({
+          error: { message: 'Invalid delivery code. Please enter the 4-digit code provided by the customer.', code: 'INVALID_DELIVERY_CODE' }
+        });
+      }
+    }
+
     order.status = 'Delivered';
     const statusHistory = Array.isArray(order.statusHistory) ? order.statusHistory : [];
     statusHistory.push({
@@ -206,6 +231,7 @@ export const completeDelivery = async (req, res, next) => {
       'Order delivered',
       `Order ${order.orderCode} has been delivered. Enjoy!`
     );
+    publishOrderChanged(order.id);
 
     return res.status(200).json(order);
   } catch (error) {
@@ -215,40 +241,87 @@ export const completeDelivery = async (req, res, next) => {
 
 const locationSchema = z.object({
   latitude: z.number().min(-90).max(90),
-  longitude: z.number().min(-180).max(180)
+  longitude: z.number().min(-180).max(180),
+  heading: z.number().min(0).max(360).nullish(),
+  accuracy: z.number().min(0).nullish()
 });
+
+// A fix worse than this (metres) is a cell-tower guess, not a position worth
+// drawing a rider on.
+const MAX_ACCEPTED_ACCURACY_M = 100;
+// Clients aim for one ping every ~3-5 s; anything faster is a bug or abuse.
+const MIN_PING_INTERVAL_MS = 1500;
+// The live position lives in memory; the DB copy only has to survive a restart.
+const DB_WRITE_INTERVAL_MS = 15 * 1000;
+const lastPing = new Map(); // riderId -> { accepted(ms), persisted(ms) }
 
 export const updateLocation = async (req, res, next) => {
   try {
-    const { latitude, longitude } = locationSchema.parse(req.body);
-    const user = await User.findByPk(req.user.id);
-    if (!user) {
-      return res.status(404).json({ error: { message: 'User not found.' } });
+    const { latitude, longitude, heading, accuracy } = locationSchema.parse(req.body);
+    if (latitude === 0 && longitude === 0) {
+      return res.status(400).json({ error: { message: 'Invalid location.' } });
     }
-    user.latitude = latitude;
-    user.longitude = longitude;
-    await user.save();
+    // Poor fixes and over-frequent pings are dropped with a 200: the rider app
+    // has nothing to fix or retry, and a 4xx would only make it back off.
+    if (accuracy != null && accuracy > MAX_ACCEPTED_ACCURACY_M) {
+      return res.status(200).json({ success: true, accepted: false });
+    }
+    const now = Date.now();
+    const seen = lastPing.get(req.user.id) || { accepted: 0, persisted: 0 };
+    if (now - seen.accepted < MIN_PING_INTERVAL_MS) {
+      return res.status(200).json({ success: true, accepted: false });
+    }
+    seen.accepted = now;
 
-    return res.status(200).json({ success: true });
+    // Live viewers get it immediately (in memory); no await on the fan-out.
+    onRiderLocation(req.user.id, { lat: latitude, lng: longitude, heading, at: now });
+
+    if (now - seen.persisted >= DB_WRITE_INTERVAL_MS) {
+      seen.persisted = now;
+      await User.update(
+        { latitude, longitude, locationUpdatedAt: new Date(now) },
+        { where: { id: req.user.id } }
+      );
+    }
+    lastPing.set(req.user.id, seen);
+
+    return res.status(200).json({ success: true, accepted: true });
   } catch (error) {
     next(error);
   }
 };
 
+/**
+ * The assigned rider's position and contact for one order. Restricted to the
+ * people on that order, and only while the delivery is in progress — a
+ * finished order must not keep exposing where the rider is.
+ */
 export const getDeliveryLocation = async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const order = await Order.findByPk(id);
-    if (!order) {
+    const order = await loadOrderForTracking(req.params.id);
+    const role = roleOnOrder(order, req.user, req.userRole);
+    if (!order || !role) {
       return res.status(404).json({ error: { message: 'Order not found.' } });
     }
     if (!order.deliveryPartnerId) {
       return res.status(400).json({ error: { message: 'Order has no assigned delivery partner.' } });
     }
-    const user = await User.findByPk(order.deliveryPartnerId, {
+    if (!['Packed', 'OutForDelivery'].includes(order.status)) {
+      return res.status(409).json({ error: { message: 'This delivery is no longer in progress.' } });
+    }
+    const rider = await User.findByPk(order.deliveryPartnerId, {
       attributes: ['id', 'latitude', 'longitude', 'firstName', 'lastName', 'mobileNumber']
     });
-    return res.status(200).json(user);
+    const live = getRiderLocation(order.deliveryPartnerId);
+    const json = rider.toJSON();
+    if (live) {
+      json.latitude = live.lat;
+      json.longitude = live.lng;
+    }
+    // A rider does not need their own phone number echoed back.
+    if (role === 'rider') delete json.mobileNumber;
+    res.set('Cache-Control', 'no-store');
+    return res.status(200).json(json);
   } catch (error) {
     next(error);
   }
@@ -269,7 +342,17 @@ export const getChatMessages = async (req, res, next) => {
       where: { orderId },
       order: [['createdAt', 'ASC']]
     });
-    return res.status(200).json(messages);
+
+    // The caller is authenticated on this route, so the server is the authority
+    // on whose message each row is. Tagging them spares every client from
+    // re-deriving it from its own profile — which the delivery app could not do
+    // (it has no consumer/merchant profile to read an id from), so a rider saw
+    // their own messages rendered as the other party's.
+    const tagged = messages.map((m) => ({
+      ...m.toJSON(),
+      mine: String(m.senderId) === String(req.user.id)
+    }));
+    return res.status(200).json(tagged);
   } catch (error) {
     next(error);
   }

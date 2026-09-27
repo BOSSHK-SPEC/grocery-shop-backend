@@ -49,8 +49,23 @@ export const CATEGORY_SEED = [
   { category: 'Paan Corner',                  icon: '🍃', units: ['piece', 'pack'] },
 ].map((c, i) => ({ ...c, displayOrder: i }));
 
-// Universal quantity units available in the product form regardless of category.
+// Every quantity unit a merchant may price or stock a product in.
+//
+// A category's own `units` list is a suggestion — the shortlist surfaced first
+// in the product form — never a restriction. Merchants sell across the grain of
+// any taxonomy (loose oil by the kg, rice by the bag, curd by the litre), so
+// the form always offers this full list underneath the suggestions. Order is
+// weight, then volume, then count, then packaging: the order the dropdown shows
+// them in when no category shortlist applies.
 export const ALL_UNITS = [
-  'kg', 'g', 'L', 'ml', 'piece', 'dozen', 'pack', 'box', 'bottle',
-  'can', 'jar', 'bunch', 'tub', 'tube', 'set', 'packet',
+  // Weight
+  'mg', 'g', 'kg', 'quintal', 'ton',
+  // Volume
+  'ml', 'L',
+  // Count
+  'piece', 'pair', 'dozen', 'set',
+  // Packaging
+  'pack', 'packet', 'sachet', 'strip', 'box', 'carton', 'bag', 'sack',
+  'bottle', 'can', 'jar', 'tin', 'tub', 'tube', 'roll', 'bundle', 'bunch',
+  'plate', 'cup', 'glass',
 ];

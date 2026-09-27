@@ -10,6 +10,12 @@ import {
   getTenantsList,
   createTenant
 } from './superAdminController.js';
+import {
+  getTenantImpact,
+  setTenantState,
+  deleteTenant
+} from '../admin/accountAdminController.js';
+import { adminActionLimiter } from '../../middleware/rateLimit.js';
 
 const superAdminRouter = Router();
 
@@ -22,5 +28,12 @@ superAdminRouter.post('/super-admin/settings', authGuard, superAdminGuard, saveG
 superAdminRouter.get('/super-admin/finance', authGuard, superAdminGuard, getFinanceSummary);
 superAdminRouter.get('/super-admin/tenants', authGuard, superAdminGuard, getTenantsList);
 superAdminRouter.post('/super-admin/tenants', authGuard, superAdminGuard, createTenant);
+
+// ── Franchise lifecycle ─────────────────────────────────────────────────
+// Suspending or deleting a franchise cascades to every account inside it.
+superAdminRouter.get('/super-admin/tenants/:id/impact', authGuard, superAdminGuard, getTenantImpact);
+superAdminRouter.post('/super-admin/tenants/:id/suspend', authGuard, superAdminGuard, adminActionLimiter, setTenantState('SUSPEND'));
+superAdminRouter.post('/super-admin/tenants/:id/reactivate', authGuard, superAdminGuard, adminActionLimiter, setTenantState('REACTIVATE'));
+superAdminRouter.delete('/super-admin/tenants/:id', authGuard, superAdminGuard, adminActionLimiter, deleteTenant);
 
 export default superAdminRouter;

@@ -1,5 +1,6 @@
 import { DataTypes } from 'sequelize';
 import sequelize from '../config/db.js';
+import { toPublicUrl } from '../storage/publicUrl.js';
 
 export const User = sequelize.define('User', {
   id: {
@@ -57,7 +58,13 @@ export const User = sequelize.define('User', {
   },
   profilePic: {
     type: DataTypes.STRING,
-    allowNull: true
+    allowNull: true,
+    // Stored as storage references; every response gets a URL for the
+    // requesting client. Internal code that needs the stored value must
+    // use getDataValue(), or it would persist a URL back.
+    get() {
+      return toPublicUrl(this.getDataValue('profilePic'));
+    }
   },
   deviceToken: {
     // FCM registration token for push notifications (nullable until registered).
@@ -70,6 +77,12 @@ export const User = sequelize.define('User', {
   },
   longitude: {
     type: DataTypes.DOUBLE,
+    allowNull: true
+  },
+  locationUpdatedAt: {
+    // When latitude/longitude were last reported. For a delivery partner this
+    // is how a reader tells a live position from a stale one.
+    type: DataTypes.DATE,
     allowNull: true
   }
 }, {

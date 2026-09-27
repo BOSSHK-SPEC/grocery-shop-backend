@@ -74,3 +74,41 @@ export const otpPhoneLimiter = (req, res, next) => {
   otpRequestLog.set(key, stamps);
   return next();
 };
+
+// Destructive admin actions (suspend, revoke, delete, franchise cascades).
+// A compromised admin session should not be able to walk the whole user
+// table in one burst; this bounds the damage to a handful of rows before
+// the audit log and the limiter both make the pattern obvious.
+// Keyed by the acting user, not the IP, so one bad session cannot hide
+// behind a shared office NAT or lock out every other admin on it.
+export const adminActionLimiter = rateLimit({
+  windowMs: intEnv('ADMIN_ACTION_WINDOW_MIN', 5) * 60 * 1000,
+  limit: intEnv('ADMIN_ACTION_MAX', 30),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => String(req.user?.id || req.ip),
+  message: {
+    error: {
+      message: 'Too many account actions in a short time. Please slow down.',
+      code: 'ADMIN_ACTION_RATE_LIMITED'
+    }
+  }
+});
+
+// Direct-upload links. Each one is cheap to issue but writes a row and lets
+// the holder put up to 5 MB into storage, so a runaway client (or a script
+// with a stolen token) is capped. Keyed by user: a registration form needs a
+// handful, a merchant adding stock maybe a few dozen in a session.
+export const uploadRequestLimiter = rateLimit({
+  windowMs: intEnv('UPLOAD_REQUEST_WINDOW_MIN', 10) * 60 * 1000,
+  limit: intEnv('UPLOAD_REQUEST_MAX', 60),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => String(req.user?.id || req.ip),
+  message: {
+    error: {
+      message: 'Too many image uploads in a short time. Please wait a few minutes and try again.',
+      code: 'UPLOAD_RATE_LIMITED'
+    }
+  }
+});

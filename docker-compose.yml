@@ -1,0 +1,68 @@
+# Local object storage for GroZerry images.
+#
+#   docker compose up -d          # start MinIO and bootstrap buckets/user
+#   docker compose logs minio-init  # see what the bootstrap did
+#   docker compose down            # stop (data is kept in the named volume)
+#
+# Credentials come from .env (see .env.example). Nothing here has a default
+# secret: compose refuses to start if the root credentials are missing, so a
+# stock "minioadmin" login can never reach a running instance by accident.
+#
+# Images are pinned to exact releases. MinIO stopped publishing community
+# images to Docker Hub, so they come from quay.io; bump them deliberately, not
+# by pulling whatever ":latest" happens to be that day.
+#
+# MINIO_IMAGE overrides the server image. The default is multi-arch (runs on
+# Apple Silicon). MinIO's later security hotfix builds, e.g.
+# RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772, are amd64-only — prefer one of
+# those on an amd64 production host.
+
+name: grozerry
+
+services:
+  minio:
+    image: ${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z}
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
+      # Browsers (Flutter web) upload straight to MinIO, so it must answer
+      # CORS preflights. Narrow this to your web origin outside local dev.
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-*}
+    ports:
+      # Loopback only by default. The Android emulator still reaches it via
+      # 10.0.2.2; set MINIO_BIND_ADDRESS=0.0.0.0 to test on a physical phone
+      # over your LAN.
+      - "${MINIO_BIND_ADDRESS:-127.0.0.1}:${MINIO_PORT:-9000}:9000"
+      - "${MINIO_BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # One-shot bootstrap: buckets, access rules, cleanup rule and the restricted
+  # app user. Idempotent — safe to re-run with `docker compose up minio-init`.
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
+      APP_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in .env}
+      APP_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in .env}
+      PUBLIC_BUCKET: ${MINIO_PUBLIC_BUCKET:-grocery-public}
+      PRIVATE_BUCKET: ${MINIO_PRIVATE_BUCKET:-grocery-private}
+    volumes:
+      - ./docker/minio:/bootstrap:ro
+    entrypoint: ["/bin/sh", "/bootstrap/init.sh"]
+    restart: "no"
+
+volumes:
+  minio-data:

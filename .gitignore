@@ -1,3 +1,7 @@
 node_modules/
 serviceAccountKey.json
 .env
+
+# User-uploaded images from the old local-disk store. Images now live in
+# object storage (MinIO); these must never be committed.
+public/uploads/

@@ -3,6 +3,44 @@ import { Op } from 'sequelize';
 import { Business, Bill, Product, sequelize } from '../../models/index.js';
 import { resolveBusiness } from '../../utils/helpers.js';
 
+/**
+ * Moves counter-sale quantities in or out of stock (`inventoryCount`).
+ * `totalQuantity` is the pack size ("500" ml) and is never touched here.
+ *
+ * direction -1 sells (stock goes down, never below 0); +1 returns stock
+ * (bill edited or deleted). Rows are matched by productId, falling back to
+ * the item name for bills written before rows carried ids. Each product row
+ * is locked for the transaction so concurrent bills cannot lose an update.
+ * Stock is counted in units, so fractional quantities are rounded.
+ */
+async function adjustStock(rows, businessId, direction, transaction) {
+  for (const row of rows || []) {
+    const units = Math.round(parseFloat(row?.qty) || 0);
+    if (units <= 0) continue;
+
+    let product = null;
+    if (row.productId) {
+      product = await Product.findOne({
+        where: { id: row.productId, businessId },
+        transaction,
+        lock: transaction.LOCK.UPDATE
+      });
+    }
+    if (!product && row.item) {
+      product = await Product.findOne({
+        where: { productName: row.item, businessId },
+        transaction,
+        lock: transaction.LOCK.UPDATE
+      });
+    }
+    if (!product) continue; // free-text line with no catalogue product
+
+    const current = Number(product.inventoryCount) || 0;
+    const next = Math.max(0, current + direction * units);
+    await product.update({ inventoryCount: next }, { transaction });
+  }
+}
+
 export const getBills = async (req, res, next) => {
   try {
     const { businessId } = req.params;
@@ -102,36 +140,7 @@ export const createBill = async (req, res, next) => {
       rows: data.rows
     }, { transaction });
 
-     // Deduct quantities
-     for (const row of data.rows) {
-       const qty = parseFloat(row.qty) || 0;
-       console.log(`[Deduction] Row details - productId: ${row.productId}, item: ${row.item}, qty: ${qty}`);
-       if (qty <= 0) continue;
- 
-       let product;
-       if (row.productId) {
-         product = await Product.findOne({
-           where: { id: row.productId, businessId: business.id },
-           transaction
-         });
-       }
-       
-       if (!product && row.item) {
-         product = await Product.findOne({
-           where: { productName: row.item, businessId: business.id },
-           transaction
-         });
-       }
- 
-       if (product) {
-         const oldQty = product.totalQuantity;
-         const newQty = Math.max(0, oldQty - qty);
-         console.log(`[Deduction] Found product ${product.productName} (ID: ${product.id}). Old Qty: ${oldQty}, Deducting: ${qty}, New Qty: ${newQty}`);
-         await product.update({ totalQuantity: newQty }, { transaction });
-       } else {
-         console.log(`[Deduction] Product NOT found in catalog!`);
-       }
-     }
+    await adjustStock(data.rows, business.id, -1, transaction);
 
     await transaction.commit();
     return res.status(201).json(newBill);
@@ -186,55 +195,9 @@ export const updateBill = async (req, res, next) => {
     const data = schema.parse(req.body);
 
     if (data.rows) {
-      // 1. Revert old bill items
-      const oldRows = bill.rows || [];
-      for (const row of oldRows) {
-        const qty = parseFloat(row.qty) || 0;
-        if (qty <= 0) continue;
-
-        let product;
-        if (row.productId) {
-          product = await Product.findOne({
-            where: { id: row.productId, businessId: business.id },
-            transaction
-          });
-        }
-        if (!product && row.item) {
-          product = await Product.findOne({
-            where: { productName: row.item, businessId: business.id },
-            transaction
-          });
-        }
-
-        if (product) {
-          await product.update({ totalQuantity: product.totalQuantity + qty }, { transaction });
-        }
-      }
-
-      // 2. Deduct new bill items
-      for (const row of data.rows) {
-        const qty = parseFloat(row.qty) || 0;
-        if (qty <= 0) continue;
-
-        let product;
-        if (row.productId) {
-          product = await Product.findOne({
-            where: { id: row.productId, businessId: business.id },
-            transaction
-          });
-        }
-        if (!product && row.item) {
-          product = await Product.findOne({
-            where: { productName: row.item, businessId: business.id },
-            transaction
-          });
-        }
-
-        if (product) {
-          const newQty = Math.max(0, product.totalQuantity - qty);
-          await product.update({ totalQuantity: newQty }, { transaction });
-        }
-      }
+      // Put the old lines back, then take the new ones out.
+      await adjustStock(bill.rows, business.id, +1, transaction);
+      await adjustStock(data.rows, business.id, -1, transaction);
     }
 
     await bill.update({
@@ -270,30 +233,7 @@ export const deleteBill = async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Bill not found' } });
     }
 
-    // Revert old bill items
-    const oldRows = bill.rows || [];
-    for (const row of oldRows) {
-      const qty = parseFloat(row.qty) || 0;
-      if (qty <= 0) continue;
-
-      let product;
-      if (row.productId) {
-        product = await Product.findOne({
-          where: { id: row.productId, businessId: business.id },
-          transaction
-        });
-      }
-      if (!product && row.item) {
-        product = await Product.findOne({
-          where: { productName: row.item, businessId: business.id },
-          transaction
-        });
-      }
-
-      if (product) {
-        await product.update({ totalQuantity: product.totalQuantity + qty }, { transaction });
-      }
-    }
+    await adjustStock(bill.rows, business.id, +1, transaction);
 
     await bill.destroy({ transaction });
     await transaction.commit();

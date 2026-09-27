@@ -1,5 +1,6 @@
 import { DataTypes } from 'sequelize';
 import sequelize from '../config/db.js';
+import { toPublicUrl } from '../storage/publicUrl.js';
 
 export const Product = sequelize.define('Product', {
   id: {
@@ -26,7 +27,14 @@ export const Product = sequelize.define('Product', {
   productThumbnail: {
     type: DataTypes.JSON,
     allowNull: false,
-    defaultValue: []
+    defaultValue: [],
+    // Stored as storage references; every response gets a URL for the
+    // requesting client. Internal code that needs the stored value must
+    // use getDataValue(), or it would persist a URL back.
+    get() {
+      const stored = this.getDataValue('productThumbnail');
+      return Array.isArray(stored) ? stored.map(toPublicUrl).filter(Boolean) : [];
+    }
   },
   price: {
     type: DataTypes.DOUBLE,

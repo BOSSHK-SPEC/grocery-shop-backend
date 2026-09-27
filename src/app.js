@@ -18,6 +18,9 @@ const __dirname = path.dirname(__filename);
 // Import Sequelize database and models
 import { sequelize, BusinessType, ProductCategory, Tenant, Coupon } from './models/index.js';
 import { CATEGORY_SEED } from './config/categories.js';
+import { storageRequestContext } from './storage/requestContext.js';
+import { verifyStorage } from './storage/imageStorage.js';
+import { BUSINESS_TYPE_SEED } from './config/businessTypes.js';
 
 // Initialize App
 const app = express();
@@ -42,20 +45,51 @@ if (corsOrigins.length === 0 && process.env.NODE_ENV === 'production') {
 }
 app.use(cors(corsOrigins.length > 0 ? { origin: corsOrigins } : {}));
 
-app.use(express.json({ limit: '10mb' })); // Support base64 image uploads
+// 10mb still covers older app versions that send images as base64 inside
+// the JSON. Current versions upload straight to object storage and send only
+// a short "upload:<id>" reference.
+app.use(express.json({ limit: '10mb' }));
 app.use(morgan('dev'));
 
-// Serve uploaded static files
+// Lets image references in responses become links for *this* client
+// (see src/storage/requestContext.js).
+app.use(storageRequestContext);
+
+// LEGACY, read-only: images uploaded before object storage lived on local
+// disk and some rows still point here. Nothing writes to this folder any
+// more. Remove once `npm run storage:migrate -- --apply` has moved them.
 app.use('/uploads', express.static(path.join(__dirname, '../public/uploads')));
 
+// Image storage must work before the server claims to be healthy. In
+// production a missing or unreachable store stops startup outright — the
+// alternative is a server that accepts products and silently drops their
+// photos. Locally it is a loud warning so the rest of the API stays usable.
+let storageReady = false;
+verifyStorage()
+  .then(() => {
+    storageReady = true;
+    console.log('[Storage] Object storage ready.');
+  })
+  .catch((err) => {
+    if (process.env.NODE_ENV === 'production') {
+      console.error(`[Storage] FATAL: ${err.message}`);
+      process.exit(1);
+    }
+    console.warn(`[Storage] Image uploads will fail until this is fixed: ${err.message}`);
+  });
+
 // Database Connection and Sync
-// TODO: replace with sequelize-cli migrations before this app has been
-// through its first production schema change without alter. Until then,
-// alter:true keeps auto-applying new columns/tables (set DB_SYNC_ALTER=false
-// once the schema is stable to stop live-altering the prod database).
-const shouldAlterSync = process.env.DB_SYNC_ALTER !== 'false';
-if (shouldAlterSync && process.env.NODE_ENV === 'production') {
-  console.warn('[DB] Starting with sequelize.sync({ alter: true }) in production — this can make unreviewed schema changes. Set DB_SYNC_ALTER=false once your schema is stable and switch to migrations.');
+// sync() creates any missing tables and never touches existing ones. That is
+// the default on purpose: sync({ alter: true }) re-issues every `unique: true`
+// column as a brand-new UNIQUE index on each boot (orderCode, orderCode_2, ...),
+// and MySQL stops at 64 indexes per table, after which startup fails with
+// ER_TOO_MANY_KEYS. Adding a column to an existing table is therefore an
+// explicit act: run once with DB_SYNC_ALTER=true, then switch it back off.
+// TODO: replace with sequelize-cli migrations before the first production
+// schema change.
+const shouldAlterSync = process.env.DB_SYNC_ALTER === 'true';
+if (shouldAlterSync) {
+  console.warn('[DB] DB_SYNC_ALTER=true: altering tables to match the models. Run this once, then unset it — it adds a duplicate unique index per run.');
 }
 sequelize.authenticate()
   .then(() => {
@@ -73,16 +107,19 @@ sequelize.authenticate()
 // Seed Initial Data Helper
 async function seedDatabase() {
   try {
-    const businessCount = await BusinessType.count();
-    if (businessCount === 0) {
-      await BusinessType.bulkCreate([
-        { businessType: 'Grocery Store' },
-        { businessType: 'Supermarket' },
-        { businessType: 'Fruit & Vegetable Shop' },
-        { businessType: 'Dairy Boutique' },
-        { businessType: 'Bakery' }
-      ]);
-      console.log('Seeded initial Business Types.');
+    // Upsert the full business-type list so newly added types show up in the
+    // onboarding dropdown on the next restart. findOrCreate keeps this
+    // idempotent and never renames or removes a type a business is linked to.
+    let businessTypesAdded = 0;
+    for (const businessType of BUSINESS_TYPE_SEED) {
+      const [, created] = await BusinessType.findOrCreate({
+        where: { businessType },
+        defaults: { businessType }
+      });
+      if (created) businessTypesAdded += 1;
+    }
+    if (businessTypesAdded > 0) {
+      console.log(`Seeded ${businessTypesAdded} new Business Types.`);
     }
 
     // Upsert the full category taxonomy so new categories are added and
@@ -145,7 +182,12 @@ async function seedDatabase() {
 
 // Global health check route
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', database: 'MySQL', timestamp: new Date() });
+  res.json({
+    status: 'ok',
+    database: 'MySQL',
+    storage: storageReady ? 'ok' : 'unavailable',
+    timestamp: new Date()
+  });
 });
 
 // Import and use API routes
@@ -175,8 +217,11 @@ app.use((err, req, res, next) => {
   // hide internal/5xx error details (ORM/driver messages, stack traces) from clients.
   const message = (!isProd || status < 500) ? (err.message || 'Internal Server Error') : 'Internal Server Error';
 
+  // A stable machine-readable code (e.g. UPLOAD_INVALID) lets clients react
+  // to a specific failure without parsing the message.
+  const code = (!isProd || status < 500) ? err.code : undefined;
   res.status(status).json({
-    error: { message, status }
+    error: { message, status, ...(typeof code === 'string' ? { code } : {}) }
   });
 });
 
