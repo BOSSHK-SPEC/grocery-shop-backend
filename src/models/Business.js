@@ -1,5 +1,6 @@
 import { DataTypes } from 'sequelize';
 import sequelize from '../config/db.js';
+import { toPublicUrl } from '../storage/publicUrl.js';
 
 export const Business = sequelize.define('Business', {
   id: {
@@ -34,6 +35,42 @@ export const Business = sequelize.define('Business', {
   },
   businessDp: {
     type: DataTypes.STRING,
+    allowNull: true,
+    // Stored as storage references; every response gets a URL for the
+    // requesting client. Internal code that needs the stored value must
+    // use getDataValue(), or it would persist a URL back.
+    get() {
+      return toPublicUrl(this.getDataValue('businessDp'));
+    }
+  },
+  storePhone: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  openingHours: {
+    type: DataTypes.JSON,
+    allowNull: true
+  },
+  acceptingOrders: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: true
+  },
+  pausedUntil: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  minimumOrder: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: false,
+    defaultValue: 0
+  },
+  kyc: {
+    type: DataTypes.JSON,
+    allowNull: true
+  },
+  payoutAccount: {
+    type: DataTypes.JSON,
     allowNull: true
   }
 }, {

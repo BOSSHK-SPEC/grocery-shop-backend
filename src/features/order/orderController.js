@@ -1,9 +1,11 @@
 import { z } from 'zod';
 import { Op } from 'sequelize';
-import { Business, Order, Product, Address, User } from '../../models/index.js';
+import { Business, Order, Address, User, sequelize } from '../../models/index.js';
+import { reserveStock, releaseStock, OutOfStockError } from './stock.js';
 import { resolveBusiness } from '../../utils/helpers.js';
 import { sendToUser } from '../../utils/notify.js';
 import { notifyMerchant } from '../../utils/websocket.js';
+import { publishOrderChanged } from '../tracking/trackingService.js';
 import { verifyPaymentSignature, getRazorpay } from '../../config/razorpay.js';
 import { computeOrderTotals, toPaise, PricingError } from './pricing.js';
 import {
@@ -248,14 +250,6 @@ export const createOrder = async (req, res, next) => {
       if (addr) deliveryAddress = addr.toJSON();
     }
 
-    // Stock was verified inside computeOrderTotals; decrement it now.
-    for (const line of totals.items) {
-      const prod = await Product.findByPk(line.productId);
-      if (prod) {
-        prod.inventoryCount = Math.max(0, prod.inventoryCount - line.quantity);
-        await prod.save();
-      }
-    }
 
     // Persist the server-priced lines in the shape the merchant UI/billing
     // already read ({ name, price, qty, total }) plus productId.
@@ -268,11 +262,19 @@ export const createOrder = async (req, res, next) => {
     }));
 
     const orderCode = `ORD-${Math.floor(100000 + Math.random() * 900000)}`;
+    const deliveryCode = Math.floor(1000 + Math.random() * 9000).toString();
     const date = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-    const newOrder = await Order.create({
+    // Stock check, stock decrement and the order row commit together, with
+    // the product rows locked, so concurrent orders cannot oversell.
+    let newOrder;
+    try {
+      newOrder = await sequelize.transaction(async (transaction) => {
+        await reserveStock(totals.items, transaction, { allowShortfall: paymentStatus === 'PAID' });
+        return Order.create({
       businessId: business.id,
       customerId: req.user ? req.user.id : null,
       orderCode,
+      deliveryCode,
       customerName: data.customerName,
       amount: finalAmount,
       status: OrderStatus.PENDING,
@@ -297,7 +299,14 @@ export const createOrder = async (req, res, next) => {
       },
       noPlasticBag: data.noPlasticBag || false,
       deliveryInstructions: data.deliveryInstructions || null
-    });
+        }, { transaction });
+      });
+    } catch (error) {
+      if (error instanceof OutOfStockError) {
+        return res.status(409).json({ error: { message: error.message, code: error.code } });
+      }
+      throw error;
+    }
 
     // Notify the store owner of the new incoming order (no-op if FCM off).
     if (business.ownerId) {
@@ -382,7 +391,12 @@ export const getConsumerOrders = async (req, res, next) => {
       ]
     });
 
-    const enriched = list.map((o) => {
+    const seenIds = new Set();
+    const enriched = [];
+    for (const o of list) {
+      if (seenIds.has(o.id)) continue;
+      seenIds.add(o.id);
+
       const j = o.toJSON();
       j.status = normalizeStatus(j.status);
       j.statusHistory = j.statusHistory || [];
@@ -393,8 +407,8 @@ export const getConsumerOrders = async (req, res, next) => {
       j.customerAddress = j.deliveryAddress ?? j.customer?.address ?? null;
       delete j.Business;
       delete j.customer;
-      return j;
-    });
+      enriched.push(j);
+    }
 
     return res.status(200).json(enriched);
   } catch (error) {
@@ -438,7 +452,16 @@ export const updateOrderStatus = async (req, res, next) => {
 
     order.status = status;
     order.statusHistory = history;
-    await order.save();
+    await sequelize.transaction(async (transaction) => {
+      // A rejected order hands its stock back to the store — once, even if
+      // two cancels race (the locked re-read sees the first one).
+      if (status === OrderStatus.CANCELLED) {
+        const fresh = await Order.findByPk(order.id, { transaction, lock: transaction.LOCK.UPDATE });
+        if (normalizeStatus(fresh.status) !== OrderStatus.CANCELLED) await releaseStock(order.items, transaction);
+      }
+      await order.save({ transaction });
+    });
+    publishOrderChanged(order.id);
 
     // Notify the customer of the status change (no-op if FCM not configured).
     if (order.customerId) {
@@ -481,7 +504,12 @@ export const cancelOrder = async (req, res, next) => {
 
     order.status = OrderStatus.CANCELLED;
     order.statusHistory = history;
-    await order.save();
+    await sequelize.transaction(async (transaction) => {
+      const fresh = await Order.findByPk(order.id, { transaction, lock: transaction.LOCK.UPDATE });
+      if (normalizeStatus(fresh.status) !== OrderStatus.CANCELLED) await releaseStock(order.items, transaction);
+      await order.save({ transaction });
+    });
+    publishOrderChanged(order.id);
 
     // Notify the store owner that the customer cancelled.
     const business = await Business.findByPk(order.businessId);
@@ -499,6 +527,119 @@ export const cancelOrder = async (req, res, next) => {
     next(error);
   }
 };
+
+export const getOrderQuote = async (req, res, next) => {
+  try {
+    const totals = await computeOrderTotals({
+      items: req.body.items,
+      couponCode: req.body.couponCode,
+      tipAmount: req.body.tipAmount,
+      businessId: req.body.businessId,
+      userId: req.user?.id,
+    });
+    return res.status(200).json({
+      ...totals,
+      etaMinMinutes: 15,
+      etaMaxMinutes: 30,
+    });
+  } catch (error) {
+    if (error instanceof PricingError) {
+      return res.status(error.status).json({ error: { message: error.message, code: error.code } });
+    }
+    next(error);
+  }
+};
+
+export const getGstInvoice = async (req, res, next) => {
+  try {
+    const { orderId } = req.params;
+    const order = await Order.findByPk(orderId, {
+      include: [{ model: Business, as: 'Business' }]
+    });
+    if (!order) {
+      return res.status(404).json({ error: { message: 'Order not found' } });
+    }
+
+    const business = order.Business;
+    const subtotal = Number(order.pricing?.subtotal || order.amount);
+    const gstTotal = Math.round(subtotal * 0.05 * 100) / 100;
+    const cgst = Math.round((gstTotal / 2) * 100) / 100;
+    const sgst = Math.round((gstTotal / 2) * 100) / 100;
+
+    const gstInvoice = {
+      invoiceNumber: `INV-${order.orderCode}`,
+      invoiceDate: order.createdAt || new Date().toISOString(),
+      seller: {
+        businessName: business?.businessName || 'GroZerry Store',
+        gstin: business?.gstNumber || '29AAAAA0000A1Z5',
+        storePhone: business?.storePhone || 'Support',
+      },
+      buyer: {
+        customerName: order.customerName,
+        deliveryAddress: order.deliveryAddress
+      },
+      items: (order.items || []).map(item => ({
+        description: item.name,
+        hsnCode: '0709',
+        qty: item.qty || item.quantity,
+        unitPrice: item.price || item.unitPrice,
+        taxableAmount: item.total || ((item.price || item.unitPrice) * (item.qty || item.quantity)),
+        gstRate: '5%',
+        cgstAmount: Math.round(((item.total || 0) * 0.025) * 100) / 100,
+        sgstAmount: Math.round(((item.total || 0) * 0.025) * 100) / 100,
+        totalAmount: Math.round(((item.total || 0) * 1.05) * 100) / 100
+      })),
+      taxBreakdown: {
+        subtotal: subtotal,
+        cgst: cgst,
+        sgst: sgst,
+        totalGst: gstTotal,
+        deliveryFee: order.pricing?.fees?.deliveryFee || 0,
+        handlingFee: order.pricing?.fees?.handlingFee || 0,
+        platformFee: order.pricing?.fees?.platformFee || 0,
+        grandTotal: Number(order.amount)
+      }
+    };
+
+    return res.status(200).json(gstInvoice);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const requestOrderReturn = async (req, res, next) => {
+  try {
+    const { orderId } = req.params;
+    const { type, reason, items, photos, refundAmount } = req.body;
+    const order = await Order.findByPk(orderId);
+
+    if (!order) {
+      return res.status(404).json({ error: { message: 'Order not found' } });
+    }
+    if (order.customerId && req.user && order.customerId !== req.user.id) {
+      return res.status(403).json({ error: { message: 'Unauthorized' } });
+    }
+
+    const returnReq = {
+      type: type || 'RETURN',
+      reason: reason || 'Item quality issue',
+      items: items || order.items,
+      photos: photos || [],
+      requestedRefund: refundAmount || order.amount,
+      status: 'PENDING',
+      requestedAt: new Date().toISOString()
+    };
+
+    order.returnRequest = returnReq;
+    await order.save();
+
+    return res.status(200).json({ success: true, returnRequest: returnReq });
+  } catch (error) {
+    next(error);
+  }
+};
+
+
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function orderToJson(order) {

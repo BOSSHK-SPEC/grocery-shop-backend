@@ -107,7 +107,16 @@ export const Order = sequelize.define('Order', {
     // Nullable so orders created before this column existed still load.
     type: DataTypes.JSON,
     allowNull: true
+  },
+  deliveryCode: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  returnRequest: {
+    type: DataTypes.JSON,
+    allowNull: true
   }
+
 }, {
   timestamps: true
 });

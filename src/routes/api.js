@@ -12,6 +12,8 @@ import { deliveryRouter } from '../features/delivery/deliveryRoutes.js';
 import { paymentRouter } from '../features/payment/paymentRoutes.js';
 import adminRouter from '../features/admin/adminRoutes.js';
 import superAdminRouter from '../features/superAdmin/superAdminRoutes.js';
+import { mediaRouter } from '../features/media/mediaRoutes.js';
+import { trackingRouter } from '../features/tracking/trackingRoutes.js';
 
 export const apiRouter = Router();
 
@@ -21,6 +23,7 @@ apiRouter.use(favoritesRouter);
 apiRouter.use(couponRouter);
 apiRouter.use(businessRouter);
 apiRouter.use(orderRouter);
+apiRouter.use(trackingRouter);
 apiRouter.use(billingRouter);
 apiRouter.use(productRouter);
 apiRouter.use(notificationRouter);
@@ -28,4 +31,5 @@ apiRouter.use('/delivery', deliveryRouter);
 apiRouter.use(paymentRouter);
 apiRouter.use(adminRouter);
 apiRouter.use(superAdminRouter);
+apiRouter.use(mediaRouter);
 

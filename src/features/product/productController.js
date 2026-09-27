@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { Op } from 'sequelize';
 import { Business, Product, ProductCategory } from '../../models/index.js';
-import { saveBase64Image, resolveBusiness } from '../../utils/helpers.js';
+import { resolveBusiness } from '../../utils/helpers.js';
+import { discardImages, replacedImages, resolveImageInputs } from '../../storage/imageStorage.js';
+import { ALL_UNITS } from '../../config/categories.js';
 
 export const getProductCategories = async (req, res, next) => {
   try {
@@ -29,6 +31,17 @@ export const getAllCategories = async (req, res, next) => {
       displayOrder: cat.displayOrder,
     }));
     return res.status(200).json(formatted);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// Every quantity unit the product form may offer, independent of category.
+// Served separately from /categories so the category payload keeps its shape
+// and this list can be fetched once and cached by the client.
+export const getAllUnits = async (req, res, next) => {
+  try {
+    return res.status(200).json(ALL_UNITS);
   } catch (error) {
     next(error);
   }
@@ -72,32 +85,37 @@ export const createProduct = async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Business not found' } });
     }
 
-    // Save thumbnails (decodes and writes base64 strings to uploads directory)
-    const savedThumbnails = [];
-    for (const base64 of validatedData.productThumbnail) {
-      const urlPath = await saveBase64Image(base64);
-      if (urlPath) {
-        savedThumbnails.push(urlPath);
-      }
-    }
+    // Each entry is an "upload:<id>" from a direct upload (or base64 from an
+    // older app). Resolving attaches it permanently; a bad image is a 400
+    // here rather than a product silently saved without its photo.
+    const savedThumbnails = await resolveImageInputs(validatedData.productThumbnail, {
+      purpose: 'product',
+      userId: req.user.id,
+    });
 
     const productCode = `PROD-${Math.floor(100000 + Math.random() * 900000)}`;
 
-    await Product.create({
-      businessId: business.id, // Use resolved database UUID
-      productCode,
-      brandName: validatedData.brandName,
-      productName: validatedData.productName,
-      productThumbnail: savedThumbnails,
-      price: validatedData.price,
-      mrp: validatedData.mrp,
-      pricePerQuantity: validatedData.pricePerQuantity,
-      pricePerQuantityUnit: validatedData.pricePerQuantityUnit,
-      category: validatedData.category,
-      totalQuantity: validatedData.totalQuantity,
-      totalQuantityUnit: validatedData.totalQuantityUnit,
-      inventoryCount: validatedData.inventoryCount || 0
-    });
+    try {
+      await Product.create({
+        businessId: business.id, // Use resolved database UUID
+        productCode,
+        brandName: validatedData.brandName,
+        productName: validatedData.productName,
+        productThumbnail: savedThumbnails,
+        price: validatedData.price,
+        mrp: validatedData.mrp,
+        pricePerQuantity: validatedData.pricePerQuantity,
+        pricePerQuantityUnit: validatedData.pricePerQuantityUnit,
+        category: validatedData.category,
+        totalQuantity: validatedData.totalQuantity,
+        totalQuantityUnit: validatedData.totalQuantityUnit,
+        inventoryCount: validatedData.inventoryCount || 0
+      });
+    } catch (error) {
+      // The photos are already stored; without the product they are orphans.
+      await discardImages(savedThumbnails);
+      throw error;
+    }
 
     return res.status(202).json('success');
   } catch (error) {
@@ -139,31 +157,41 @@ export const updateProduct = async (req, res, next) => {
     });
     const validatedData = schema.parse(req.body);
 
-    // Update thumbnail if provided
-    let savedThumbnails = product.productThumbnail || [];
+    // Stored references, not the URLs the getter would return — reading
+    // product.productThumbnail here would write URLs back into the row.
+    const previousThumbnails = product.getDataValue('productThumbnail') || [];
+    let savedThumbnails = previousThumbnails;
     if (validatedData.productThumbnail) {
-      savedThumbnails = [];
-      for (const base64 of validatedData.productThumbnail) {
-        const urlPath = await saveBase64Image(base64);
-        if (urlPath) {
-          savedThumbnails.push(urlPath);
-        }
-      }
+      // Unchanged photos come back as the URLs the client was given; those
+      // resolve to the stored references. New ones are uploads to attach.
+      savedThumbnails = await resolveImageInputs(validatedData.productThumbnail, {
+        purpose: 'product',
+        userId: req.user.id,
+        current: previousThumbnails,
+      });
     }
+    const newlyStored = replacedImages(savedThumbnails, previousThumbnails);
 
-    await product.update({
-      brandName: validatedData.brandName !== undefined ? validatedData.brandName : product.brandName,
-      productName: validatedData.productName !== undefined ? validatedData.productName : product.productName,
-      productThumbnail: savedThumbnails,
-      price: validatedData.price !== undefined ? validatedData.price : product.price,
-      mrp: validatedData.mrp !== undefined ? validatedData.mrp : product.mrp,
-      pricePerQuantity: validatedData.pricePerQuantity !== undefined ? validatedData.pricePerQuantity : product.pricePerQuantity,
-      pricePerQuantityUnit: validatedData.pricePerQuantityUnit !== undefined ? validatedData.pricePerQuantityUnit : product.pricePerQuantityUnit,
-      category: validatedData.category !== undefined ? validatedData.category : product.category,
-      totalQuantity: validatedData.totalQuantity !== undefined ? validatedData.totalQuantity : product.totalQuantity,
-      totalQuantityUnit: validatedData.totalQuantityUnit !== undefined ? validatedData.totalQuantityUnit : product.totalQuantityUnit,
-      inventoryCount: validatedData.inventoryCount !== undefined ? validatedData.inventoryCount : product.inventoryCount
-    });
+    try {
+      await product.update({
+        brandName: validatedData.brandName !== undefined ? validatedData.brandName : product.brandName,
+        productName: validatedData.productName !== undefined ? validatedData.productName : product.productName,
+        productThumbnail: savedThumbnails,
+        price: validatedData.price !== undefined ? validatedData.price : product.price,
+        mrp: validatedData.mrp !== undefined ? validatedData.mrp : product.mrp,
+        pricePerQuantity: validatedData.pricePerQuantity !== undefined ? validatedData.pricePerQuantity : product.pricePerQuantity,
+        pricePerQuantityUnit: validatedData.pricePerQuantityUnit !== undefined ? validatedData.pricePerQuantityUnit : product.pricePerQuantityUnit,
+        category: validatedData.category !== undefined ? validatedData.category : product.category,
+        totalQuantity: validatedData.totalQuantity !== undefined ? validatedData.totalQuantity : product.totalQuantity,
+        totalQuantityUnit: validatedData.totalQuantityUnit !== undefined ? validatedData.totalQuantityUnit : product.totalQuantityUnit,
+        inventoryCount: validatedData.inventoryCount !== undefined ? validatedData.inventoryCount : product.inventoryCount
+      });
+    } catch (error) {
+      await discardImages(newlyStored);
+      throw error;
+    }
+    // Only once the row points at the new photos is the old one safe to drop.
+    await discardImages(replacedImages(previousThumbnails, savedThumbnails));
 
     return res.status(200).json(product);
   } catch (error) {
@@ -195,22 +223,66 @@ export const deleteProduct = async (req, res, next) => {
 
 export const getProductsAcrossBusinesses = async (req, res, next) => {
   try {
-    const { category, search } = req.query;
+    const { category, search, q, minPrice, maxPrice, inStockOnly, sortBy, page, limit } = req.query;
+    const searchTerm = (search || q || '').trim();
     const where = {};
+
     if (category) {
       where.category = category;
     }
-    if (search) {
-      where.productName = { [Op.like]: `%${search}%` };
+    if (searchTerm) {
+      where[Op.or] = [
+        { productName: { [Op.like]: `%${searchTerm}%` } },
+        { brandName: { [Op.like]: `%${searchTerm}%` } }
+      ];
     }
+    if (minPrice || maxPrice) {
+      where.price = {};
+      if (minPrice) where.price[Op.gte] = parseFloat(minPrice);
+      if (maxPrice) where.price[Op.lte] = parseFloat(maxPrice);
+    }
+    if (inStockOnly === 'true' || inStockOnly === '1') {
+      where.inventoryCount = { [Op.gt]: 0 };
+    }
+
+    let order = [['createdAt', 'DESC']];
+    if (sortBy === 'price_asc') order = [['price', 'ASC']];
+    if (sortBy === 'price_desc') order = [['price', 'DESC']];
+    if (sortBy === 'name') order = [['productName', 'ASC']];
+    if (sortBy === 'newest') order = [['createdAt', 'DESC']];
+
+    if (page || limit) {
+      const pageNum = parseInt(page, 10) || 1;
+      const limitNum = parseInt(limit, 10) || 20;
+      const offset = (pageNum - 1) * limitNum;
+
+      const { count, rows } = await Product.findAndCountAll({
+        where,
+        order,
+        limit: limitNum,
+        offset,
+        include: [{ model: Business, as: 'business', attributes: ['businessName', 'id'] }]
+      });
+
+      return res.status(200).json({
+        products: rows,
+        pagination: {
+          totalCount: count,
+          totalPages: Math.ceil(count / limitNum),
+          currentPage: pageNum,
+          limit: limitNum
+        }
+      });
+    }
+
     const products = await Product.findAll({
       where,
-      include: [
-        { model: Business, as: 'business', attributes: ['businessName', 'id'] }
-      ]
+      order,
+      include: [{ model: Business, as: 'business', attributes: ['businessName', 'id'] }]
     });
     return res.status(200).json(products);
   } catch (error) {
     next(error);
   }
 };
+

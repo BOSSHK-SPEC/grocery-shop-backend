@@ -1,6 +1,19 @@
 import { User, Address, Business, Order, Bill, Tenant, BusinessType, BusinessBusinessType } from '../../models/index.js';
 import { sendToUser } from '../../utils/notify.js';
+import { presentUserMisc } from '../../storage/imageStorage.js';
+
+/**
+ * A user row as an admin should see it: the stored licence reference in
+ * `misc` becomes a short-lived signed link, so reviewing a rider's licence
+ * works without the licence ever being publicly reachable.
+ */
+async function presentUserRow(user) {
+  const plain = user.toJSON();
+  if (plain.misc) plain.misc = await presentUserMisc(plain.misc);
+  return plain;
+}
 import { z } from 'zod';
+import { applyReviewDecision } from '../../utils/modes.js';
 import { Op } from 'sequelize';
 
 export const getPendingUsers = async (req, res, next) => {
@@ -25,7 +38,7 @@ export const getPendingUsers = async (req, res, next) => {
       }
 
       list.push({
-        user: u,
+        user: await presentUserRow(u),
         address,
         businesses
       });
@@ -55,6 +68,10 @@ export const approveUser = async (req, res, next) => {
     if (!isSuperAdmin && user.tenantId !== req.user.tenantId) {
       return res.status(403).json({ error: { message: 'Access denied. You can only manage users within your franchise.' } });
     }
+
+    // Decide every mode waiting for review (never one already decided).
+    user.misc = applyReviewDecision(user.misc, action);
+    user.changed('misc', true);
 
     if (action === 'approve') {
       user.status = 'ACTIVE';
@@ -163,7 +180,7 @@ export const getAdminAnalytics = async (req, res, next) => {
     for (const r of ridersRaw) {
       const address = await Address.findOne({ where: { userId: r.id } });
       riders.push({
-        user: r,
+        user: await presentUserRow(r),
         address
       });
     }
@@ -201,6 +218,18 @@ export const getAdminAnalytics = async (req, res, next) => {
       y: regCounts[day]
     }));
 
+    // The franchise this console is scoped to. Everything above is already
+    // filtered by it, and every account the admin creates is bound to it
+    // server-side — surfacing it lets the UI state that plainly instead of
+    // leaving the operator to guess. Null for the super admin, who is global.
+    let franchise = null;
+    if (!isSuperAdmin && req.user.tenantId) {
+      const tenant = await Tenant.findByPk(req.user.tenantId, {
+        attributes: ['id', 'name', 'code', 'status']
+      });
+      if (tenant) franchise = tenant;
+    }
+
     return res.status(200).json({
       stats: {
         totalMerchants,
@@ -209,6 +238,7 @@ export const getAdminAnalytics = async (req, res, next) => {
         totalOrders,
         totalRevenue
       },
+      franchise,
       merchants,
       riders,
       weeklyRegistrations
@@ -542,7 +572,7 @@ export const getRidersPaginated = async (req, res, next) => {
 
     const totalPages = Math.ceil(count / limit);
 
-    const list = rows.map(u => {
+    const list = await Promise.all(rows.map(async u => {
       return {
         user: {
           id: u.id,
@@ -552,13 +582,13 @@ export const getRidersPaginated = async (req, res, next) => {
           role: u.role,
           status: u.status,
           profilePic: u.profilePic,
-          misc: u.misc,
+          misc: await presentUserMisc(u.misc),
           tenantId: u.tenantId,
           createdAt: u.createdAt
         },
         address: u.address
       };
-    });
+    }));
 
     return res.status(200).json({
       data: list,
@@ -573,3 +603,53 @@ export const getRidersPaginated = async (req, res, next) => {
     next(error);
   }
 };
+
+export const getDisputes = async (req, res, next) => {
+  try {
+    const ordersWithDisputes = await Order.findAll({
+      where: {
+        returnRequest: { [Op.ne]: null }
+      },
+      include: [
+        { model: Business, as: 'Business', attributes: ['businessName', 'id'] }
+      ],
+      order: [['updatedAt', 'DESC']]
+    });
+
+    return res.status(200).json(ordersWithDisputes);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const resolveDispute = async (req, res, next) => {
+  try {
+    const { orderId } = req.params;
+    const { status, refundAmount, notes } = req.body;
+    const order = await Order.findByPk(orderId);
+
+    if (!order || !order.returnRequest) {
+      return res.status(404).json({ error: { message: 'Dispute/Return request not found for this order' } });
+    }
+
+    const currentReq = order.returnRequest;
+    currentReq.status = status; // 'APPROVED' | 'REJECTED' | 'RESOLVED'
+    currentReq.approvedRefund = refundAmount !== undefined ? refundAmount : currentReq.requestedRefund;
+    currentReq.resolutionNotes = notes || '';
+    currentReq.resolvedAt = new Date().toISOString();
+    currentReq.resolvedBy = req.user.id;
+
+    order.returnRequest = currentReq;
+    order.changed('returnRequest', true);
+
+    if (status === 'APPROVED') {
+      order.status = 'Returned';
+    }
+    await order.save();
+
+    return res.status(200).json({ success: true, order });
+  } catch (error) {
+    next(error);
+  }
+};
+

@@ -1,6 +1,10 @@
 import express from 'express';
 import { authGuard } from '../../middleware/auth.js';
 import * as deliveryController from './deliveryController.js';
+import { requireMode } from '../../middleware/access.js';
+
+// Rider-only endpoints: the caller must be an approved delivery partner.
+const rider = requireMode('delivering');
 
 export const deliveryRouter = express.Router();
 
@@ -8,17 +12,17 @@ export const deliveryRouter = express.Router();
 deliveryRouter.use(authGuard);
 
 // Location & Availability APIs
-deliveryRouter.patch('/location', deliveryController.updateLocation);
+deliveryRouter.patch('/location', rider, deliveryController.updateLocation);
 deliveryRouter.get('/orders/:id/location', deliveryController.getDeliveryLocation);
-deliveryRouter.post('/status', deliveryController.toggleOnlineStatus);
+deliveryRouter.post('/status', rider, deliveryController.toggleOnlineStatus);
 
 // Delivery Job Claims & Transitions APIs
-deliveryRouter.get('/orders/available', deliveryController.getAvailableDeliveries);
-deliveryRouter.get('/orders/active', deliveryController.getActiveDeliveries);
-deliveryRouter.get('/orders/history', deliveryController.getDeliveryHistory);
-deliveryRouter.post('/orders/:id/claim', deliveryController.claimDelivery);
-deliveryRouter.post('/orders/:id/pickup', deliveryController.startDelivery);
-deliveryRouter.post('/orders/:id/complete', deliveryController.completeDelivery);
+deliveryRouter.get('/orders/available', rider, deliveryController.getAvailableDeliveries);
+deliveryRouter.get('/orders/active', rider, deliveryController.getActiveDeliveries);
+deliveryRouter.get('/orders/history', rider, deliveryController.getDeliveryHistory);
+deliveryRouter.post('/orders/:id/claim', rider, deliveryController.claimDelivery);
+deliveryRouter.post('/orders/:id/pickup', rider, deliveryController.startDelivery);
+deliveryRouter.post('/orders/:id/complete', rider, deliveryController.completeDelivery);
 
 // Ratings & Complaints APIs
 deliveryRouter.post('/orders/:id/rate', deliveryController.rateOrder);
