@@ -609,10 +609,22 @@ export const onboardDelivery = async (req, res, next) => {
     const legacy = legacyFieldsForApplication(user, 'delivering');
     user.status = legacy.status;
     user.role = legacy.role;
-    if (tenantId && tenantId !== 'standalone') {
-      user.tenantId = tenantId;
+    // A seller's franchise is tied to their store. Applying to deliver must not
+    // move them: the "standalone" default the app sends would otherwise null out
+    // the tenant and detach the account from its own store.
+    const requestedTenant = tenantId && tenantId !== 'standalone' ? tenantId : null;
+    const sellsHere = user.tenantId && [ModeStatus.PENDING, ModeStatus.ACTIVE].includes(modesOf(user).selling.status);
+    if (sellsHere) {
+      if (requestedTenant && String(requestedTenant) !== String(user.tenantId)) {
+        return res.status(409).json({
+          error: {
+            message: 'This account sells for a different franchise, so it cannot deliver for another one.',
+            code: 'TENANT_CONFLICT'
+          }
+        });
+      }
     } else {
-      user.tenantId = null;
+      user.tenantId = requestedTenant;
     }
 
     const previousDlPic = user.misc?.dlPic || null;

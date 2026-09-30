@@ -16,7 +16,7 @@ import { OrderStatus, normalizeStatus } from '../order/orderStatus.js';
 
 /** Owner fields that may leave the server (never password, device token, location). */
 const OWNER_SAFE_FIELDS = ['id', 'firstName', 'lastName', 'mobileNumber', 'email', 'profilePic'];
-import { discardImages, resolveImageInput } from '../../storage/imageStorage.js';
+import { discardImages, resolveImageInput, presentBusiness, presentKyc } from '../../storage/imageStorage.js';
 
 export const getAllBusinessType = async (req, res, next) => {
   try {
@@ -185,8 +185,9 @@ export const getBusinessProfile = async (req, res, next) => {
     if (!business) {
       return res.status(404).json({ error: { message: 'Business not found' } });
     }
-    const json = business.toJSON();
     const isOwner = business.ownerId === req.user.id || isAdminRole(req.userRole) || isAdminRole(req.user.role);
+    // KYC and payout details are for the owner and admins only.
+    const json = await presentBusiness(business, { includePrivate: isOwner });
     if (!isOwner && json.owner) {
       // Shoppers see who runs the store, not how to reach them privately.
       json.owner = { firstName: json.owner.firstName };
@@ -290,7 +291,7 @@ export const updateBusinessProfile = async (req, res, next) => {
       where: { id: business.id },
       include: ['address', { model: User, as: 'owner', attributes: OWNER_SAFE_FIELDS }]
     });
-    return res.status(200).json(updated);
+    return res.status(200).json(await presentBusiness(updated, { includePrivate: true }));
   } catch (error) {
     next(error);
   }
@@ -402,7 +403,8 @@ export const getAllBusinesses = async (req, res, next) => {
         { model: BusinessType, as: 'businessType' }
       ]
     });
-    return res.status(200).json(list);
+    // Every signed-in user can list stores, so KYC and payout details stay out.
+    return res.status(200).json(await Promise.all(list.map((b) => presentBusiness(b))));
   } catch (error) {
     next(error);
   }
@@ -420,7 +422,7 @@ export const saveStoreProfile = async (req, res, next) => {
     if (openingHours !== undefined) business.openingHours = openingHours;
     await business.save();
 
-    return res.status(200).json({ success: true, business });
+    return res.status(200).json({ success: true, business: await presentBusiness(business, { includePrivate: true }) });
   } catch (error) {
     next(error);
   }
@@ -447,7 +449,7 @@ export const submitKyc = async (req, res, next) => {
     };
     await business.save();
 
-    return res.status(200).json({ success: true, kyc: business.kyc });
+    return res.status(200).json({ success: true, kyc: await presentKyc(business.kyc) });
   } catch (error) {
     next(error);
   }

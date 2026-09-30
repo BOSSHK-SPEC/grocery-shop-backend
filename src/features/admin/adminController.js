@@ -1,6 +1,6 @@
 import { User, Address, Business, Order, Bill, Tenant, BusinessType, BusinessBusinessType } from '../../models/index.js';
 import { sendToUser } from '../../utils/notify.js';
-import { presentUserMisc } from '../../storage/imageStorage.js';
+import { presentUserMisc, presentBusiness } from '../../storage/imageStorage.js';
 
 /**
  * A user row as an admin should see it: the stored licence reference in
@@ -13,35 +13,48 @@ async function presentUserRow(user) {
   return plain;
 }
 import { z } from 'zod';
-import { applyReviewDecision } from '../../utils/modes.js';
-import { Op } from 'sequelize';
+import {
+  applyReviewDecision, pendingModes, statusForView, legacyStatusAfterReview, REVIEWABLE_MODES
+} from '../../utils/modes.js';
+import { modeMembership, modeStatusIs } from '../../utils/modeQueries.js';
+import { reviewScopeWhere, canReviewUser } from '../../utils/reviewScope.js';
+import { Op, literal } from 'sequelize';
+import sequelize from '../../config/db.js';
+
+/** Businesses for an admin reviewer: KYC photos become short-lived signed links. */
+const presentBusinesses = (businesses) =>
+  Promise.all((businesses ?? []).map((b) => presentBusiness(b, { includePrivate: true })));
+
+/** The application a legacy row stands for when no per-mode record exists. */
+const legacyApplication = (user) =>
+  user.role === 'merchant' ? 'selling' : user.role === 'delivery' ? 'delivering' : null;
 
 export const getPendingUsers = async (req, res, next) => {
   try {
-    const isSuperAdmin = req.userRole === 'super_admin' || req.user.role === 'super_admin';
-    const tenantFilter = isSuperAdmin ? {} : { tenantId: req.user.tenantId };
-
     const users = await User.findAll({
-      where: { status: 'PENDING_APPROVAL', ...tenantFilter },
-      attributes: ['id', 'mobileNumber', 'firstName', 'lastName', 'role', 'status', 'profilePic', 'misc', 'createdAt']
+      where: { status: 'PENDING_APPROVAL', ...reviewScopeWhere(req.user, req.userRole) },
+      attributes: ['id', 'mobileNumber', 'firstName', 'lastName', 'role', 'status', 'profilePic', 'misc', 'tenantId', 'createdAt']
     });
 
+    // One account can have a seller and a rider application open at once, and an
+    // admin decides them separately, so each application is its own entry.
     const list = [];
     for (const u of users) {
       const address = await Address.findOne({ where: { userId: u.id } });
-      let businesses = [];
-      if (u.role === 'merchant') {
-        businesses = await Business.findAll({
-          where: { ownerId: u.id, ...tenantFilter },
-          include: [{ model: Address, as: 'address' }]
+      const applications = pendingModes(u);
+      if (applications.length === 0) applications.push(legacyApplication(u));
+      const row = await presentUserRow(u);
+
+      for (const application of applications) {
+        const businesses = application === 'selling'
+          ? await Business.findAll({ where: { ownerId: u.id }, include: [{ model: Address, as: 'address' }] })
+          : [];
+        list.push({
+          user: { ...row, application },
+          address,
+          businesses: await presentBusinesses(businesses)
         });
       }
-
-      list.push({
-        user: await presentUserRow(u),
-        address,
-        businesses
-      });
     }
 
     return res.status(200).json(list);
@@ -54,31 +67,43 @@ export const approveUser = async (req, res, next) => {
   try {
     const schema = z.object({
       userId: z.string(),
-      action: z.enum(['approve', 'reject'])
+      action: z.enum(['approve', 'reject']),
+      // Which application to decide. Omitted, every pending one is decided
+      // (older clients, and accounts with a single application).
+      mode: z.enum(REVIEWABLE_MODES).optional()
     });
 
-    const { userId, action } = schema.parse(req.body);
+    const { userId, action, mode } = schema.parse(req.body);
     const user = await User.findByPk(userId);
 
     if (!user) {
       return res.status(404).json({ error: { message: 'User not found.' } });
     }
 
-    const isSuperAdmin = req.userRole === 'super_admin' || req.user.role === 'super_admin';
-    if (!isSuperAdmin && user.tenantId !== req.user.tenantId) {
+    if (!canReviewUser(req.user, req.userRole, user)) {
       return res.status(403).json({ error: { message: 'Access denied. You can only manage users within your franchise.' } });
     }
 
-    // Decide every mode waiting for review (never one already decided).
-    user.misc = applyReviewDecision(user.misc, action);
+    if (mode && !pendingModes(user).includes(mode)) {
+      return res.status(409).json({
+        error: { message: `This account has no pending ${mode} application.`, code: 'NOT_PENDING' }
+      });
+    }
+
+    // Decide the modes waiting for review (never one already decided).
+    const tracked = Object.keys(user.misc?.modes || {}).length > 0;
+    user.misc = applyReviewDecision(user.misc, action, mode);
     user.changed('misc', true);
+    // Accounts that predate per-mode tracking have only the legacy status.
+    const status = tracked ? legacyStatusAfterReview(user) : action === 'approve' ? 'ACTIVE' : 'REJECTED';
+    const label = mode === 'delivering' ? 'delivery partner' : mode === 'selling' ? 'seller' : 'partner';
 
     if (action === 'approve') {
-      user.status = 'ACTIVE';
+      user.status = status;
 
       // If this is a standalone store (meaning a new tenant partition was created and has 0 admins),
       // promote this user to the tenant 'admin' role so they can access the web console.
-      if (user.role === 'merchant' && user.tenantId) {
+      if (mode !== 'delivering' && user.role === 'merchant' && user.tenantId) {
         const adminCount = await User.count({
           where: { tenantId: user.tenantId, role: 'admin' }
         });
@@ -93,25 +118,27 @@ export const approveUser = async (req, res, next) => {
       await sendToUser(
         user.id,
         'Account Approved 🎉',
-        'Congratulations! Your Bazaar partner account has been approved and is now active.',
+        `Congratulations! Your Bazaar ${label} application has been approved.`,
         {
           type: 'approval_status',
-          status: 'ACTIVE'
+          status: 'ACTIVE',
+          ...(mode ? { mode } : {})
         }
       );
 
       return res.status(200).json({ message: 'User approved successfully.', user });
     } else {
-      user.status = 'REJECTED';
+      user.status = status;
       await user.save();
 
       await sendToUser(
         user.id,
         'Account Status Update',
-        'Your registration request could not be approved at this time.',
+        `Your ${label} application could not be approved at this time.`,
         {
           type: 'approval_status',
-          status: 'REJECTED'
+          status: 'REJECTED',
+          ...(mode ? { mode } : {})
         }
       );
 
@@ -125,12 +152,18 @@ export const approveUser = async (req, res, next) => {
 export const getAdminAnalytics = async (req, res, next) => {
   try {
     const isSuperAdmin = req.userRole === 'super_admin' || req.user.role === 'super_admin';
-    const tenantFilter = isSuperAdmin ? {} : { tenantId: req.user.tenantId };
-    const businessInclude = isSuperAdmin ? [] : [{ model: Business, required: true, where: { tenantId: req.user.tenantId } }];
+    // One scope for the whole console, so the stats, the queue and the lists
+    // can never disagree about what this admin is allowed to see.
+    const tenantFilter = reviewScopeWhere(req.user, req.userRole);
 
-    const totalMerchants = await User.count({ where: { role: 'merchant', ...tenantFilter } });
-    const totalRiders = await User.count({ where: { role: 'delivery', ...tenantFilter } });
-    const pendingApprovals = await User.count({ where: { status: 'PENDING_APPROVAL', ...tenantFilter } });
+    const totalMerchants = await User.count({ where: { ...modeMembership('selling'), ...tenantFilter } });
+    const totalRiders = await User.count({ where: { ...modeMembership('delivering'), ...tenantFilter } });
+    // Same scope and same unit as the approvals queue: one per open application.
+    const pending = await User.findAll({
+      where: { status: 'PENDING_APPROVAL', ...reviewScopeWhere(req.user, req.userRole) },
+      attributes: ['id', 'role', 'status', 'misc']
+    });
+    const pendingApprovals = pending.reduce((n, u) => n + Math.max(1, pendingModes(u).length), 0);
 
     let totalOrders = 0;
     let totalRevenue = 0;
@@ -140,7 +173,7 @@ export const getAdminAnalytics = async (req, res, next) => {
       totalRevenue = (await Bill.sum('amount')) || 0;
     } else {
       const tenantBusinesses = await Business.findAll({
-        where: { tenantId: req.user.tenantId },
+        where: tenantFilter,
         attributes: ['id']
       });
       const businessIds = tenantBusinesses.map(b => b.id);
@@ -152,8 +185,8 @@ export const getAdminAnalytics = async (req, res, next) => {
 
     // Fetch all merchants
     const merchantsRaw = await User.findAll({
-      where: { role: 'merchant', ...tenantFilter },
-      attributes: ['id', 'mobileNumber', 'firstName', 'lastName', 'status', 'profilePic', 'createdAt']
+      where: { ...modeMembership('selling'), ...tenantFilter },
+      attributes: ['id', 'mobileNumber', 'firstName', 'lastName', 'role', 'status', 'profilePic', 'misc', 'createdAt']
     });
 
     const merchants = [];
@@ -164,23 +197,23 @@ export const getAdminAnalytics = async (req, res, next) => {
         include: [{ model: Address, as: 'address' }]
       });
       merchants.push({
-        user: m,
+        user: { ...m.toJSON(), misc: undefined, status: statusForView(m, 'selling') },
         address,
-        businesses
+        businesses: await presentBusinesses(businesses)
       });
     }
 
     // Fetch all riders
     const ridersRaw = await User.findAll({
-      where: { role: 'delivery', ...tenantFilter },
-      attributes: ['id', 'mobileNumber', 'firstName', 'lastName', 'status', 'profilePic', 'misc', 'createdAt']
+      where: { ...modeMembership('delivering'), ...tenantFilter },
+      attributes: ['id', 'mobileNumber', 'firstName', 'lastName', 'role', 'status', 'profilePic', 'misc', 'createdAt']
     });
 
     const riders = [];
     for (const r of ridersRaw) {
       const address = await Address.findOne({ where: { userId: r.id } });
       riders.push({
-        user: await presentUserRow(r),
+        user: { ...(await presentUserRow(r)), status: statusForView(r, 'delivering') },
         address
       });
     }
@@ -449,11 +482,16 @@ export const getMerchantsPaginated = async (req, res, next) => {
     const isSuperAdmin = req.userRole === 'super_admin' || req.user.role === 'super_admin';
     let finalTenantId = isSuperAdmin ? tenantId : req.user.tenantId;
 
-    const userWhere = { role: 'merchant' };
+    // Membership and search are both OR-groups, so they are ANDed together.
+    const clauses = [modeMembership('selling')];
+    const userWhere = { [Op.and]: clauses };
     if (status) {
-      userWhere.status = status;
+      clauses.push(modeStatusIs('selling', status));
     }
-    if (finalTenantId) {
+    if (!isSuperAdmin) {
+      // An admin is confined to their franchise; a missing tenant means no access.
+      Object.assign(userWhere, reviewScopeWhere(req.user, req.userRole));
+    } else if (finalTenantId) {
       if (finalTenantId === 'standalone') {
         userWhere.tenantId = null;
       } else {
@@ -462,12 +500,16 @@ export const getMerchantsPaginated = async (req, res, next) => {
     }
 
     if (search) {
-      userWhere[Op.or] = [
-        { firstName: { [Op.like]: `%${search}%` } },
-        { lastName: { [Op.like]: `%${search}%` } },
-        { mobileNumber: { [Op.like]: `%${search}%` } },
-        { '$businesses.businessName$': { [Op.like]: `%${search}%` } }
-      ];
+      clauses.push({
+        [Op.or]: [
+          { firstName: { [Op.like]: `%${search}%` } },
+          { lastName: { [Op.like]: `%${search}%` } },
+          { mobileNumber: { [Op.like]: `%${search}%` } },
+          // A joined column cannot be filtered inside a paginated query, so match
+          // the store name through the owner id instead.
+          { id: { [Op.in]: literal(`(SELECT ownerId FROM Businesses WHERE businessName LIKE ${sequelize.escape(`%${search}%`)})`) } }
+        ]
+      });
     }
 
     const { count, rows } = await User.findAndCountAll({
@@ -492,7 +534,7 @@ export const getMerchantsPaginated = async (req, res, next) => {
     const totalPages = Math.ceil(count / limit);
 
     // Structure list to match the user-address-businesses dashboard pattern
-    const list = rows.map(u => {
+    const list = await Promise.all(rows.map(async (u) => {
       return {
         user: {
           id: u.id,
@@ -500,15 +542,15 @@ export const getMerchantsPaginated = async (req, res, next) => {
           firstName: u.firstName,
           lastName: u.lastName,
           role: u.role,
-          status: u.status,
+          status: statusForView(u, 'selling'),
           profilePic: u.profilePic,
           tenantId: u.tenantId,
           createdAt: u.createdAt
         },
         address: u.address,
-        businesses: u.businesses
+        businesses: await presentBusinesses(u.businesses)
       };
-    });
+    }));
 
     return res.status(200).json({
       data: list,
@@ -536,11 +578,15 @@ export const getRidersPaginated = async (req, res, next) => {
     const isSuperAdmin = req.userRole === 'super_admin' || req.user.role === 'super_admin';
     let finalTenantId = isSuperAdmin ? tenantId : req.user.tenantId;
 
-    const userWhere = { role: 'delivery' };
+    const clauses = [modeMembership('delivering')];
+    const userWhere = { [Op.and]: clauses };
     if (status) {
-      userWhere.status = status;
+      clauses.push(modeStatusIs('delivering', status));
     }
-    if (finalTenantId) {
+    if (!isSuperAdmin) {
+      // An admin is confined to their franchise; a missing tenant means no access.
+      Object.assign(userWhere, reviewScopeWhere(req.user, req.userRole));
+    } else if (finalTenantId) {
       if (finalTenantId === 'standalone') {
         userWhere.tenantId = null;
       } else {
@@ -549,11 +595,13 @@ export const getRidersPaginated = async (req, res, next) => {
     }
 
     if (search) {
-      userWhere[Op.or] = [
-        { firstName: { [Op.like]: `%${search}%` } },
-        { lastName: { [Op.like]: `%${search}%` } },
-        { mobileNumber: { [Op.like]: `%${search}%` } }
-      ];
+      clauses.push({
+        [Op.or]: [
+          { firstName: { [Op.like]: `%${search}%` } },
+          { lastName: { [Op.like]: `%${search}%` } },
+          { mobileNumber: { [Op.like]: `%${search}%` } }
+        ]
+      });
     }
 
     const { count, rows } = await User.findAndCountAll({
@@ -580,7 +628,7 @@ export const getRidersPaginated = async (req, res, next) => {
           firstName: u.firstName,
           lastName: u.lastName,
           role: u.role,
-          status: u.status,
+          status: statusForView(u, 'delivering'),
           profilePic: u.profilePic,
           misc: await presentUserMisc(u.misc),
           tenantId: u.tenantId,

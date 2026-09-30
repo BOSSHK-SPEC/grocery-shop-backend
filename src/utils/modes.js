@@ -71,18 +71,53 @@ export function withModeStatus(misc, mode, status, extra = {}) {
 }
 
 /**
- * Applies an admin decision to every mode that is waiting for review, so an
- * approval never touches a mode that was already decided.
+ * Applies an admin decision to the modes waiting for review, so an approval
+ * never touches a mode that was already decided. With [only] the decision is
+ * limited to that one mode, which is how an admin approves a seller
+ * application without also approving the same account's rider application.
  */
-export function applyReviewDecision(misc, decision) {
+export function applyReviewDecision(misc, decision, only = null) {
   const next = decision === 'approve' ? ModeStatus.ACTIVE : ModeStatus.REJECTED;
   const modes = { ...(misc?.modes || {}) };
   for (const [name, value] of Object.entries(modes)) {
+    if (only && name !== only) continue;
     if (value?.status === ModeStatus.PENDING) {
       modes[name] = { ...value, status: next, updatedAt: new Date().toISOString() };
     }
   }
   return { ...(misc || {}), modes };
+}
+
+/** The modes an admin can be asked to review: `selling` and `delivering`. */
+export const REVIEWABLE_MODES = ['selling', 'delivering'];
+
+/** Modes of [user] currently waiting for an admin decision. */
+export function pendingModes(user) {
+  const modes = modesOf(user);
+  return REVIEWABLE_MODES.filter((mode) => modes[mode].status === ModeStatus.PENDING);
+}
+
+/**
+ * Status of one mode as a list for that mode should show it. Falls back to the
+ * legacy `status` for accounts whose mode cannot be derived, so a row never
+ * loses its state just because it predates `misc.modes`.
+ */
+export function statusForView(user, mode) {
+  const status = modesOf(user)[mode]?.status;
+  return status && status !== ModeStatus.NOT_STARTED ? status : user.status;
+}
+
+/**
+ * Legacy `status` after a review. It stays PENDING_APPROVAL while any
+ * application is still waiting (that is what keeps the account in the approvals
+ * list), and a rejection never locks out an account that still works in
+ * another mode.
+ */
+export function legacyStatusAfterReview(user) {
+  const tracked = REVIEWABLE_MODES.map((m) => user?.misc?.modes?.[m]?.status).filter(Boolean);
+  if (tracked.includes(ModeStatus.PENDING)) return ModeStatus.PENDING;
+  if (tracked.includes(ModeStatus.ACTIVE)) return ModeStatus.ACTIVE;
+  return ModeStatus.REJECTED;
 }
 
 /**

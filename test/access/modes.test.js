@@ -68,3 +68,47 @@ test('rider-only endpoints refuse shoppers and pending riders', () => {
   assert.ok(run(guard, { user: user({ role: 'admin' }), userRole: 'admin' }).nextCalled);
   assert.equal(run(guard, { user: user() }).body.error.code, 'MODE_NOT_ACTIVE');
 });
+
+import { pendingModes, statusForView, legacyStatusAfterReview } from '../../src/utils/modes.js';
+
+const both = () => user({
+  role: 'merchant',
+  status: 'PENDING_APPROVAL',
+  misc: withModeStatus(withModeStatus({ businessId: ['b1'] }, 'selling', ModeStatus.PENDING), 'delivering', ModeStatus.PENDING),
+});
+
+test('a seller who also applied to ride has both applications listed', () => {
+  assert.deepEqual(pendingModes(both()), ['selling', 'delivering']);
+  // Legacy rows without misc.modes still surface as one application.
+  assert.deepEqual(pendingModes(user({ role: 'delivery', status: 'PENDING_APPROVAL' })), ['delivering']);
+});
+
+test('a decision can be limited to one application', () => {
+  const u = both();
+  const misc = applyReviewDecision(u.misc, 'approve', 'delivering');
+  assert.equal(misc.modes.delivering.status, ModeStatus.ACTIVE);
+  assert.equal(misc.modes.selling.status, ModeStatus.PENDING, 'the seller application is untouched');
+  // Without a mode every pending application is decided, as before.
+  const all = applyReviewDecision(u.misc, 'reject');
+  assert.equal(all.modes.selling.status, ModeStatus.REJECTED);
+  assert.equal(all.modes.delivering.status, ModeStatus.REJECTED);
+});
+
+test('the account stays in the approvals list until every application is decided', () => {
+  const u = both();
+  u.misc = applyReviewDecision(u.misc, 'approve', 'delivering');
+  assert.equal(legacyStatusAfterReview(u), ModeStatus.PENDING);
+  u.misc = applyReviewDecision(u.misc, 'reject', 'selling');
+  assert.equal(legacyStatusAfterReview(u), ModeStatus.ACTIVE, 'a rejection never locks out a working mode');
+  const rejectedOnly = user({ misc: withModeStatus({ businessId: ['b1'] }, 'selling', ModeStatus.REJECTED) });
+  assert.equal(legacyStatusAfterReview(rejectedOnly), ModeStatus.REJECTED);
+});
+
+test('each list shows the status of its own application', () => {
+  const u = both();
+  u.misc = applyReviewDecision(u.misc, 'approve', 'delivering');
+  assert.equal(statusForView(u, 'delivering'), ModeStatus.ACTIVE);
+  assert.equal(statusForView(u, 'selling'), ModeStatus.PENDING);
+  // Falls back to the legacy status when the mode cannot be derived.
+  assert.equal(statusForView(user({ role: 'merchant', status: 'ACTIVE', misc: { businessId: [] } }), 'selling'), 'ACTIVE');
+});

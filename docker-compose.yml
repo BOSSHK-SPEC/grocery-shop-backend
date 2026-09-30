@@ -9,13 +9,15 @@
 # stock "minioadmin" login can never reach a running instance by accident.
 #
 # Images are pinned to exact releases. MinIO stopped publishing community
-# images to Docker Hub, so they come from quay.io; bump them deliberately, not
-# by pulling whatever ":latest" happens to be that day.
+# images to Docker Hub, then (~Sept 2026) archived the open-source
+# Server/Client/mc projects outright: Docker Hub returns 404, quay.io returns
+# 401 to anonymous pulls, and MinIO's own dl.min.io binary downloads return
+# 410 Gone. There is no new tag to bump to. These defaults are pinned to
+# whatever image was already pulled to a host before that lockdown — check
+# `docker images | grep minio` before changing them, and don't expect `docker
+# compose pull` to work on a fresh host anymore.
 #
-# MINIO_IMAGE overrides the server image. The default is multi-arch (runs on
-# Apple Silicon). MinIO's later security hotfix builds, e.g.
-# RELEASE.2025-09-07T16-13-09Z.hotfix.7aa24e772, are amd64-only — prefer one of
-# those on an amd64 production host.
+# MINIO_IMAGE overrides the server image.
 
 name: grozerry
 
@@ -48,7 +50,7 @@ services:
   # One-shot bootstrap: buckets, access rules, cleanup rule and the restricted
   # app user. Idempotent — safe to re-run with `docker compose up minio-init`.
   minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    image: ${MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z}
     depends_on:
       minio:
         condition: service_healthy

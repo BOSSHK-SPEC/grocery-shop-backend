@@ -315,6 +315,38 @@ export async function presentUserMisc(misc) {
   return { ...misc, dlPic: await toPrivateUrl(misc.dlPic) };
 }
 
+// Identity documents inside a business's KYC record. They are stored as
+// private references, so a client can only open them through a signed link.
+const PRIVATE_KYC_FIELDS = ['panPhoto', 'fssaiPhoto'];
+
+/** `kyc` as a client entitled to see it should receive it: photos as signed links. */
+export async function presentKyc(kyc) {
+  if (!kyc || typeof kyc !== 'object') return kyc ?? null;
+  const out = { ...kyc };
+  for (const field of PRIVATE_KYC_FIELDS) {
+    if (out[field]) out[field] = await toPrivateUrl(out[field]);
+  }
+  return out;
+}
+
+/**
+ * A business as JSON for a given viewer. Secure by default: KYC (PAN, document
+ * photos) and the payout account are only included when `includePrivate` is
+ * set, which callers do for the store's owner and for admins. Shoppers and
+ * everyone else get the storefront fields only.
+ */
+export async function presentBusiness(business, { includePrivate = false } = {}) {
+  if (!business) return business;
+  const plain = typeof business.toJSON === 'function' ? business.toJSON() : { ...business };
+  if (includePrivate) {
+    plain.kyc = await presentKyc(plain.kyc);
+  } else {
+    delete plain.kyc;
+    delete plain.payoutAccount;
+  }
+  return plain;
+}
+
 // ── Housekeeping ──────────────────────────────────────────────────────────
 
 /**
