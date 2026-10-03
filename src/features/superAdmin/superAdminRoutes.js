@@ -8,7 +8,8 @@ import {
   saveGlobalSettings,
   getFinanceSummary,
   getTenantsList,
-  createTenant
+  createTenant,
+  getConsumersPaginated
 } from './superAdminController.js';
 import {
   getTenantImpact,
@@ -28,6 +29,7 @@ superAdminRouter.post('/super-admin/settings', authGuard, superAdminGuard, saveG
 superAdminRouter.get('/super-admin/finance', authGuard, superAdminGuard, getFinanceSummary);
 superAdminRouter.get('/super-admin/tenants', authGuard, superAdminGuard, getTenantsList);
 superAdminRouter.post('/super-admin/tenants', authGuard, superAdminGuard, createTenant);
+superAdminRouter.get('/super-admin/consumers', authGuard, superAdminGuard, getConsumersPaginated);
 
 // ── Franchise lifecycle ─────────────────────────────────────────────────
 // Suspending or deleting a franchise cascades to every account inside it.

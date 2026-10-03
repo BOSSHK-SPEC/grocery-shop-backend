@@ -308,11 +308,18 @@ export async function toPrivateUrl(value) {
   }
 }
 
-/** `misc` as a client should see it: the licence as a signed link. */
+// Rider identity/KYC documents inside `misc` that are stored as private
+// references, so a client can only open them through a signed link.
+const PRIVATE_RIDER_DOC_FIELDS = ['dlPic', 'dlPicBack', 'selfie', 'rcPhoto'];
+
+/** `misc` as a client should see it: every rider document as a signed link. */
 export async function presentUserMisc(misc) {
   if (!misc || typeof misc !== 'object') return misc ?? null;
-  if (!misc.dlPic) return misc;
-  return { ...misc, dlPic: await toPrivateUrl(misc.dlPic) };
+  const out = { ...misc };
+  for (const field of PRIVATE_RIDER_DOC_FIELDS) {
+    if (out[field]) out[field] = await toPrivateUrl(out[field]);
+  }
+  return out;
 }
 
 // Identity documents inside a business's KYC record. They are stored as

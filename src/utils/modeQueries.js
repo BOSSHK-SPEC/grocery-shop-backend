@@ -7,7 +7,14 @@ import { Op, literal } from 'sequelize';
 // role happens to point.
 
 const MODE_KEYS = { selling: 'merchant', delivering: 'delivery' };
-const NON_CONSOLE_ROLES = ['admin', 'super_admin'];
+// Platform staff only — not tenant admins. A merchant approved as the first
+// account for a new standalone tenant is promoted to `admin` so they can
+// reach the web console (see adminController.approveUser), but they are
+// still that tenant's merchant and must stay visible in its directory. A
+// plain promoteToAdmin() account has no recorded application at all, so the
+// `IS NOT NULL` check below already excludes it without needing a role
+// filter — this guards only the genuine platform-staff case.
+const NON_CONSOLE_ROLES = ['super_admin'];
 
 // Interpolated into SQL, so only ever a value from MODE_KEYS.
 const modeKey = (mode) => {
@@ -20,8 +27,8 @@ const modeStatusSql = (mode) =>
 
 /**
  * Users who belong in the list for [mode]: those whose legacy role says so, plus
- * anyone with a recorded application for it. Admins are excluded from the second
- * group exactly as they always were from these lists.
+ * anyone with a recorded application for it. Platform staff (super_admin) are
+ * excluded from the second group; a tenant admin with a real application is not.
  */
 export const modeMembership = (mode) => ({
   [Op.or]: [

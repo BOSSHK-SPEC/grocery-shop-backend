@@ -12,6 +12,7 @@ import {
   AuditLog
 } from '../models/index.js';
 import { revokeAllForUser } from './tokens.js';
+import { ModeStatus, legacyStatusAfterReview, isAdminRole } from './modes.js';
 
 // Account states. SUSPENDED is enforced in authGuard and at login, so it
 // takes effect on the very next request rather than whenever the current
@@ -237,6 +238,67 @@ export const hardDeleteUser = async (user, { transaction } = {}) => {
 
     await User.destroy({ where: { id: user.id }, transaction: t });
     return businessIds.length;
+  };
+
+  if (transaction) return run(transaction);
+  return sequelize.transaction(run);
+};
+
+/**
+ * Removes just one application ("selling" or "delivering") from an account.
+ * Unlike [hardDeleteUser], the `User` row — and everything that makes it a
+ * working consumer account (address, notifications, favorites, sessions,
+ * order history) — is left completely untouched. This is what the Partner
+ * Directory's "Remove seller/rider status" should call instead of a full
+ * delete: a merchant or rider removed from one capability is still the same
+ * person who can keep shopping.
+ *
+ * A seller's store(s) are closed (acceptingOrders: false), not deleted —
+ * their products, bills and order history are a financial/compliance record
+ * that must survive the merchant losing seller status. A rider's KYC photos
+ * are cleared, since nothing keeps referencing them once the application is
+ * gone.
+ */
+export const removeApplication = async (user, mode, { transaction } = {}) => {
+  const run = async (t) => {
+    let affectedBusinesses = 0;
+    if (mode === 'selling') {
+      const [count] = await Business.update(
+        { acceptingOrders: false },
+        { where: { ownerId: user.id, acceptingOrders: true }, transaction: t }
+      );
+      affectedBusinesses = count;
+    }
+
+    const modes = { ...(user.misc?.modes || {}) };
+    modes[mode] = { ...(modes[mode] || {}), status: ModeStatus.REJECTED, updatedAt: new Date().toISOString() };
+    const misc = { ...(user.misc || {}), modes };
+    if (mode === 'delivering') {
+      misc.bikeRegNumber = null;
+      misc.dlPic = null;
+      misc.dlPicBack = null;
+      misc.selfie = null;
+      misc.rcPhoto = null;
+    }
+    user.misc = misc;
+    user.changed('misc', true);
+
+    // An admin's own standing is a separate privilege from any application —
+    // never touched here (mirrors approveUser's promotion case). Otherwise,
+    // the legacy single role/status fields must stop pointing at an
+    // application that is no longer current, the same way a normal rejection
+    // of a pending application already updates them.
+    if (!isAdminRole(user.role)) {
+      user.status = legacyStatusAfterReview(user);
+      const roleForMode = { selling: 'merchant', delivering: 'delivery' };
+      if (user.role === roleForMode[mode]) {
+        const otherMode = mode === 'selling' ? 'delivering' : 'selling';
+        user.role = modes[otherMode]?.status === ModeStatus.ACTIVE ? roleForMode[otherMode] : 'consumer';
+      }
+    }
+
+    await user.save({ transaction: t });
+    return { businessesClosed: affectedBusinesses, role: user.role, status: user.status };
   };
 
   if (transaction) return run(transaction);

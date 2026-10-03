@@ -35,7 +35,20 @@ export const Bill = sequelize.define('Bill', {
   rows: {
     type: DataTypes.JSON,
     allowNull: false
+  },
+  // Client-generated, carried in the `Idempotency-Key` header. Lets a
+  // network-timeout retry of the exact same "Create Bill" tap return the
+  // original bill instead of billing (and decrementing stock) twice — see
+  // `billingController.js#createBill`. Null for callers that do not send
+  // one; MySQL's unique index treats every NULL as distinct, so those never
+  // collide with each other.
+  idempotencyKey: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
-  timestamps: true
+  timestamps: true,
+  indexes: [
+    { unique: true, fields: ['businessId', 'idempotencyKey'] }
+  ]
 });
