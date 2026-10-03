@@ -8,6 +8,8 @@ import { ProductCategory } from './ProductCategory.js';
 import { Product } from './Product.js';
 import { Order } from './Order.js';
 import { Bill } from './Bill.js';
+import { Invoice } from './Invoice.js';
+import { InvoiceCounter } from './InvoiceCounter.js';
 import { Notification } from './Notification.js';
 import { ChatMessage } from './ChatMessage.js';
 import { Tenant } from './Tenant.js';
@@ -18,6 +20,8 @@ import { Favorite } from './Favorite.js';
 import { Coupon } from './Coupon.js';
 import { AuditLog } from './AuditLog.js';
 import { UploadIntent } from './UploadIntent.js';
+import { DeviceToken } from './DeviceToken.js';
+import { DashboardVisit } from './DashboardVisit.js';
 
 // Setup Relationships
 
@@ -57,6 +61,25 @@ Order.belongsTo(User, { foreignKey: 'customerId', as: 'customer' });
 Business.hasMany(Bill, { foreignKey: 'businessId', as: 'bills', onDelete: 'CASCADE' });
 Bill.belongsTo(Business, { foreignKey: 'businessId' });
 
+// Business - Invoice (One to Many)
+Business.hasMany(Invoice, { foreignKey: 'businessId', as: 'invoices', onDelete: 'CASCADE' });
+Invoice.belongsTo(Business, { foreignKey: 'businessId' });
+
+// User - Invoice (One to Many). customerId is nullable: a walk-in bill's
+// invoice starts unlinked and is matched onto an account by mobile number
+// (see invoiceController.js) until/unless it is claimed here.
+User.hasMany(Invoice, { foreignKey: 'customerId', as: 'invoices' });
+Invoice.belongsTo(User, { foreignKey: 'customerId', as: 'customer' });
+
+// Bill - Invoice (One to One). The invoice is the legal document; the bill
+// is the operational record (stock, payment mode) that produced it.
+// `sourceId` also holds order ids when sourceType is 'order', so it is not a
+// true foreign key to Bill alone (`constraints: false`, no DB-level FK) —
+// only this direction (scoped to sourceType: 'bill') is modelled as an
+// association; the reverse lookup is done in code from `invoice.sourceId`,
+// never via Sequelize `include`, so it can never silently join the wrong table.
+Bill.hasOne(Invoice, { foreignKey: 'sourceId', scope: { sourceType: 'bill' }, constraints: false, as: 'invoice' });
+
 // Business - BusinessType (Many to Many)
 const BusinessBusinessType = sequelize.define('BusinessBusinessType', {}, { timestamps: false });
 Business.belongsToMany(BusinessType, { through: BusinessBusinessType, foreignKey: 'businessId', as: 'businessType' });
@@ -94,6 +117,10 @@ Favorite.belongsTo(Product, { foreignKey: 'productId', as: 'product' });
 Business.hasMany(Coupon, { foreignKey: 'businessId', as: 'coupons', onDelete: 'CASCADE' });
 Coupon.belongsTo(Business, { foreignKey: 'businessId', as: 'business' });
 
+// User - DeviceToken (One to Many): every signed-in device/browser gets pushed to.
+User.hasMany(DeviceToken, { foreignKey: 'userId', as: 'deviceTokens', onDelete: 'CASCADE' });
+DeviceToken.belongsTo(User, { foreignKey: 'userId' });
+
 export {
   sequelize,
   User,
@@ -105,6 +132,8 @@ export {
   Product,
   Order,
   Bill,
+  Invoice,
+  InvoiceCounter,
   Notification,
   ChatMessage,
   BusinessBusinessType,
@@ -115,5 +144,7 @@ export {
   Favorite,
   Coupon,
   AuditLog,
-  UploadIntent
+  UploadIntent,
+  DeviceToken,
+  DashboardVisit
 };

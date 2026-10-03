@@ -1,4 +1,4 @@
-import { User, Address, Business, Order, Bill, Tenant, BusinessType, BusinessBusinessType } from '../../models/index.js';
+import { User, Address, Business, Order, Bill, Tenant, BusinessType, BusinessBusinessType, DashboardVisit } from '../../models/index.js';
 import { sendToUser } from '../../utils/notify.js';
 import { presentUserMisc, presentBusiness } from '../../storage/imageStorage.js';
 
@@ -99,8 +99,6 @@ export const approveUser = async (req, res, next) => {
     const label = mode === 'delivering' ? 'delivery partner' : mode === 'selling' ? 'seller' : 'partner';
 
     if (action === 'approve') {
-      user.status = status;
-
       // If this is a standalone store (meaning a new tenant partition was created and has 0 admins),
       // promote this user to the tenant 'admin' role so they can access the web console.
       if (mode !== 'delivering' && user.role === 'merchant' && user.tenantId) {
@@ -111,6 +109,11 @@ export const approveUser = async (req, res, next) => {
           user.role = 'admin';
         }
       }
+
+      // An admin's own standing is unconditional (promoteToAdmin() always sets
+      // ACTIVE too) — it must not stay PENDING just because this same account
+      // also has an unrelated rider/seller application still awaiting review.
+      user.status = user.role === 'admin' ? 'ACTIVE' : status;
 
       await user.save();
 
@@ -164,6 +167,13 @@ export const getAdminAnalytics = async (req, res, next) => {
       attributes: ['id', 'role', 'status', 'misc']
     });
     const pendingApprovals = pending.reduce((n, u) => n + Math.max(1, pendingModes(u).length), 0);
+
+    // Distinct admin/super-admin visit-days, scoped the same way as every
+    // other stat here. Recorded separately by recordDashboardVisit — this is
+    // a read of the running total, never a write.
+    const totalVisitors = isSuperAdmin
+      ? await DashboardVisit.count()
+      : await DashboardVisit.count({ where: { tenantId: req.user.tenantId } });
 
     let totalOrders = 0;
     let totalRevenue = 0;
@@ -269,13 +279,39 @@ export const getAdminAnalytics = async (req, res, next) => {
         totalRiders,
         pendingApprovals,
         totalOrders,
-        totalRevenue
+        totalRevenue,
+        totalVisitors
       },
       franchise,
       merchants,
       riders,
       weeklyRegistrations
     });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Marks this admin/super-admin as having opened the web console today.
+ * Called once per page load from the client, separately from
+ * /admin/analytics (which can be refetched many times a session and must
+ * never itself inflate the visitor count). findOrCreate on the
+ * (actorId, visitDate) unique index makes repeat calls on the same day a
+ * no-op, so the total reported by /admin/analytics counts people, not hits.
+ */
+export const recordDashboardVisit = async (req, res, next) => {
+  try {
+    const isSuperAdmin = req.userRole === 'super_admin' || req.user.role === 'super_admin';
+    const visitDate = new Date().toISOString().slice(0, 10);
+    await DashboardVisit.findOrCreate({
+      where: { actorId: req.user.id, visitDate },
+      defaults: {
+        actorRole: req.userRole || req.user.role,
+        tenantId: isSuperAdmin ? null : req.user.tenantId || null
+      }
+    });
+    return res.status(204).end();
   } catch (error) {
     next(error);
   }

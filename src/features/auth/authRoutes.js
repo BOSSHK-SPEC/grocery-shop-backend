@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requestOtp, verifyOtp, login, refreshToken, logout, onboardConsumer, onboardDelivery, getConsumerProfile, registerDeviceToken, getTenantsPublic, deleteAccount, getMyModes, updateProfile } from './authController.js';
+import { requestOtp, verifyOtp, login, refreshToken, logout, onboardConsumer, onboardDelivery, getConsumerProfile, registerDeviceToken, unregisterDeviceToken, getTenantsPublic, deleteAccount, getMyModes, updateProfile } from './authController.js';
 import { authGuard } from '../../middleware/auth.js';
 import { authLimiter, otpPhoneLimiter } from '../../middleware/rateLimit.js';
 
@@ -17,5 +17,6 @@ authRouter.post('/auth/onboardDelivery', authGuard, onboardDelivery);
 authRouter.get('/auth/consumer/profile', authGuard, getConsumerProfile);
 authRouter.get('/auth/me/modes', authGuard, getMyModes);
 authRouter.post('/auth/device-token', authGuard, registerDeviceToken);
+authRouter.delete('/auth/device-token', authGuard, unregisterDeviceToken);
 authRouter.get('/tenants', getTenantsPublic);
 

@@ -28,6 +28,10 @@ export const IMAGE_PURPOSES = Object.freeze({
   business_logo: { visibility: VISIBILITY.PUBLIC, folder: 'businesses' },
   profile_picture: { visibility: VISIBILITY.PUBLIC, folder: 'profiles' },
   driving_licence: { visibility: VISIBILITY.PRIVATE, folder: 'licences' },
+  // A rider KYC selfie and a vehicle's registration certificate are identity
+  // documents the same way a licence is: private, signed-link only.
+  rider_selfie: { visibility: VISIBILITY.PRIVATE, folder: 'selfies' },
+  vehicle_rc: { visibility: VISIBILITY.PRIVATE, folder: 'vehicles' },
 });
 
 export const isImagePurpose = (value) =>

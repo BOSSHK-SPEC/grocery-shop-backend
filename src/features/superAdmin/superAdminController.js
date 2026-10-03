@@ -1,5 +1,6 @@
 import { User, Business, Order, Bill, Address, Tenant } from '../../models/index.js';
 import { z } from 'zod';
+import { Op, literal } from 'sequelize';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -180,6 +181,61 @@ export const createTenant = async (req, res, next) => {
 
     const tenant = await Tenant.create({ name, code });
     return res.status(201).json(tenant);
+  } catch (error) {
+    next(error);
+  }
+};
+
+// 9. Consumers: paginated directory. Unlike merchants/riders, shopping has no
+// application/approval flow and no tenant of its own (every account starts as
+// a plain consumer), so this is simply every user whose role is still
+// 'consumer' — not scoped by franchise, and only reachable by platform staff.
+export const getConsumersPaginated = async (req, res, next) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+    const search = (req.query.search || '').trim();
+
+    const where = { role: 'consumer' };
+    if (search) {
+      where[Op.or] = [
+        { firstName: { [Op.like]: `%${search}%` } },
+        { lastName: { [Op.like]: `%${search}%` } },
+        { mobileNumber: { [Op.like]: `%${search}%` } }
+      ];
+    }
+
+    const { count, rows } = await User.findAndCountAll({
+      where,
+      attributes: {
+        include: [[literal('(SELECT COUNT(*) FROM `Orders` WHERE `Orders`.`customerId` = `User`.`id`)'), 'orderCount']]
+      },
+      include: [{ model: Address, as: 'address' }],
+      limit,
+      offset,
+      order: [['createdAt', 'DESC']],
+      distinct: true
+    });
+
+    const list = rows.map((u) => ({
+      user: {
+        id: u.id,
+        mobileNumber: u.mobileNumber,
+        firstName: u.firstName,
+        lastName: u.lastName,
+        status: u.status,
+        profilePic: u.profilePic,
+        createdAt: u.createdAt,
+        orderCount: Number(u.get('orderCount')) || 0
+      },
+      address: u.address
+    }));
+
+    return res.status(200).json({
+      data: list,
+      meta: { total: count, page, limit, totalPages: Math.ceil(count / limit) }
+    });
   } catch (error) {
     next(error);
   }

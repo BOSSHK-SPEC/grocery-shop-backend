@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { Op } from 'sequelize';
-import { Business, Bill, Product, sequelize } from '../../models/index.js';
+import { Business, Bill, Invoice, Product, sequelize } from '../../models/index.js';
 import { resolveBusiness } from '../../utils/helpers.js';
+import { createInvoiceForBill, getOrRenderInvoicePdfUrl } from '../invoice/invoiceController.js';
+import { InvoiceStatus, canTransition } from '../invoice/invoiceStatus.js';
 
 /**
  * Moves counter-sale quantities in or out of stock (`inventoryCount`).
@@ -81,8 +83,12 @@ export const getBills = async (req, res, next) => {
       const limitNum = parseInt(limit, 10) || 10;
       const offset = (pageNum - 1) * limitNum;
 
+      // Invoice status rides along on the list (no pdfUrl here — rendering
+      // every row's PDF just to list bills would be wasteful; the detail
+      // endpoint renders it lazily for the one bill actually opened).
       const { count, rows } = await Bill.findAndCountAll({
         where,
+        include: [{ model: Invoice, as: 'invoice' }],
         order: [['createdAt', 'DESC']],
         limit: limitNum,
         offset
@@ -98,6 +104,7 @@ export const getBills = async (req, res, next) => {
     } else {
       bills = await Bill.findAll({
         where,
+        include: [{ model: Invoice, as: 'invoice' }],
         order: [['createdAt', 'DESC']]
       });
     }
@@ -111,15 +118,55 @@ export const getBills = async (req, res, next) => {
   }
 };
 
+/** Trimmed `Idempotency-Key` header, or null if the caller did not send one. */
+function idempotencyKeyOf(req) {
+  const raw = req.headers['idempotency-key'];
+  const key = typeof raw === 'string' ? raw.trim() : '';
+  return key.length > 0 ? key.slice(0, 255) : null;
+}
+
+/** The bill (with its invoice + a fresh pdfUrl) already written for this key, or null. */
+async function findBillByIdempotencyKey(businessId, idempotencyKey) {
+  if (!idempotencyKey) return null;
+  return Bill.findOne({ where: { businessId, idempotencyKey }, include: [{ model: Invoice, as: 'invoice' }] });
+}
+
+async function presentBillWithInvoice(bill, business) {
+  const plain = bill.toJSON();
+  if (plain.invoice) {
+    plain.invoice.pdfUrl = await getOrRenderInvoicePdfUrl(bill.invoice, business);
+  }
+  return plain;
+}
+
+/** True for a unique-constraint violation on the (businessId, idempotencyKey) index specifically. */
+function isIdempotencyKeyConflict(error) {
+  if (error?.name !== 'SequelizeUniqueConstraintError') return false;
+  if (error.fields && 'idempotencyKey' in error.fields) return true;
+  return (error.errors || []).some(e => e.path === 'idempotencyKey');
+}
+
 export const createBill = async (req, res, next) => {
-  const transaction = await sequelize.transaction();
   try {
     const { businessId } = req.params;
     const business = await resolveBusiness(businessId);
     if (!business) {
-      await transaction.rollback();
       return res.status(404).json({ error: { message: 'Business not found' } });
     }
+
+    // A retry of the exact same "Create Bill" tap (e.g. after a timeout that
+    // left the seller unsure whether it went through) returns the bill that
+    // already exists for this key instead of billing — and decrementing
+    // stock — a second time. Checked before opening a transaction: this is
+    // the common case (the first call already committed), so it should not
+    // pay for one. The rarer true race (two concurrent requests for a brand
+    // new key) is handled below via the unique index itself.
+    const idempotencyKey = idempotencyKeyOf(req);
+    const already = await findBillByIdempotencyKey(business.id, idempotencyKey);
+    if (already) {
+      return res.status(200).json(await presentBillWithInvoice(already, business));
+    }
+
     const schema = z.object({
       customerName: z.string(),
       mobile: z.string().optional().nullable(),
@@ -127,25 +174,56 @@ export const createBill = async (req, res, next) => {
       rows: z.array(z.any())
     });
     const data = schema.parse(req.body);
-    const billCode = `BILL-${Math.floor(100000 + Math.random() * 900000)}`;
-    const date = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-    
-    const newBill = await Bill.create({
-      businessId: business.id,
-      billCode,
-      customerName: data.customerName,
-      mobile: data.mobile,
-      amount: data.amount,
-      date,
-      rows: data.rows
-    }, { transaction });
 
-    await adjustStock(data.rows, business.id, -1, transaction);
+    const transaction = await sequelize.transaction();
+    let newBill, invoice;
+    try {
+      const billCode = `BILL-${Math.floor(100000 + Math.random() * 900000)}`;
+      const date = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 
-    await transaction.commit();
-    return res.status(201).json(newBill);
+      newBill = await Bill.create({
+        businessId: business.id,
+        billCode,
+        customerName: data.customerName,
+        mobile: data.mobile,
+        amount: data.amount,
+        date,
+        rows: data.rows,
+        idempotencyKey
+      }, { transaction });
+
+      await adjustStock(data.rows, business.id, -1, transaction);
+
+      // The invoice is created in the same transaction as the bill: either
+      // both exist or neither does, so a walk-in sale is never left without
+      // the document that makes it visible to the customer.
+      invoice = await createInvoiceForBill({ bill: newBill, business, rows: data.rows, transaction });
+
+      await transaction.commit();
+    } catch (error) {
+      await transaction.rollback();
+      // Lost the race: another request with the same key committed first
+      // (both passed the check above before either had written). Serve its
+      // result instead of a spurious error — this is still "success" from
+      // the caller's point of view, the same sale was not double-billed.
+      if (isIdempotencyKeyConflict(error)) {
+        const winner = await findBillByIdempotencyKey(business.id, idempotencyKey);
+        if (winner) return res.status(200).json(await presentBillWithInvoice(winner, business));
+      }
+      throw error;
+    }
+
+    // PDF rendering + the object-storage upload are slow I/O and must never
+    // hold the transaction above open; run them after it commits, and treat
+    // failure as retryable (pdfKey stays null; the next read of this invoice
+    // renders it lazily) rather than as a reason to fail bill creation.
+    const pdfUrl = await getOrRenderInvoicePdfUrl(invoice, business);
+
+    // Merged onto the bill's own fields (never nested) so the existing
+    // `BillDto.fromJson` — which reads specific keys and ignores the rest —
+    // keeps parsing this response unchanged; `invoice` is additive.
+    return res.status(201).json({ ...newBill.toJSON(), invoice: { ...invoice.toJSON(), pdfUrl } });
   } catch (error) {
-    await transaction.rollback();
     next(error);
   }
 };
@@ -158,12 +236,13 @@ export const getBillById = async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Business not found' } });
     }
     const bill = await Bill.findOne({
-      where: { id: billId, businessId: business.id }
+      where: { id: billId, businessId: business.id },
+      include: [{ model: Invoice, as: 'invoice' }]
     });
     if (!bill) {
       return res.status(404).json({ error: { message: 'Bill not found' } });
     }
-    return res.status(200).json(bill);
+    return res.status(200).json(await presentBillWithInvoice(bill, business));
   } catch (error) {
     next(error);
   }
@@ -195,6 +274,18 @@ export const updateBill = async (req, res, next) => {
     const data = schema.parse(req.body);
 
     if (data.rows) {
+      // Once the invoice has been handed over, the sale is final: editing
+      // the lines afterwards would silently desync the bill from the
+      // invoice the customer already has (its items/totals are a snapshot,
+      // not re-derived — see createInvoiceForBill). Earlier statuses still
+      // allow edits; only a delivered sale is locked.
+      const invoice = await Invoice.findOne({ where: { sourceType: 'bill', sourceId: bill.id }, transaction });
+      if (invoice?.status === InvoiceStatus.DELIVERED) {
+        await transaction.rollback();
+        return res.status(409).json({
+          error: { message: 'This bill has already been delivered and invoiced; it can no longer be edited.', code: 'BILL_LOCKED' }
+        });
+      }
       // Put the old lines back, then take the new ones out.
       await adjustStock(bill.rows, business.id, +1, transaction);
       await adjustStock(data.rows, business.id, -1, transaction);
@@ -224,7 +315,7 @@ export const deleteBill = async (req, res, next) => {
       await transaction.rollback();
       return res.status(404).json({ error: { message: 'Business not found' } });
     }
-    const bill = await Bill.findOne({ 
+    const bill = await Bill.findOne({
       where: { id: billId, businessId: business.id },
       transaction
     });
@@ -234,6 +325,23 @@ export const deleteBill = async (req, res, next) => {
     }
 
     await adjustStock(bill.rows, business.id, +1, transaction);
+
+    // The bill record is going away, but its invoice is a fiscal document:
+    // it is cancelled, not deleted, so the number and audit trail survive.
+    // A delivered invoice is left alone — the goods already changed hands,
+    // so deleting the bill cannot undo that.
+    const invoice = await Invoice.findOne({
+      where: { sourceType: 'bill', sourceId: bill.id },
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    if (invoice && canTransition(invoice.status, InvoiceStatus.CANCELLED)) {
+      const now = new Date();
+      await invoice.update({
+        status: InvoiceStatus.CANCELLED,
+        statusHistory: [...(invoice.statusHistory || []), { status: InvoiceStatus.CANCELLED, by: 'merchant', at: now.toISOString() }]
+      }, { transaction });
+    }
 
     await bill.destroy({ transaction });
     await transaction.commit();

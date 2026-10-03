@@ -11,13 +11,45 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { User, Notification } from '../models/index.js';
+import { User, Notification, DeviceToken } from '../models/index.js';
+
+// Where a web push notification opens when clicked. No default origin is
+// baked in — pushes still deliver and display without one; only the
+// click-through link is affected (the service worker falls back to its own
+// origin). Set WEB_APP_URL, or this reuses the first CORS_ORIGINS entry
+// since that is already the deployed web app's origin on most setups.
+function webAppOrigin() {
+  const explicit = (process.env.WEB_APP_URL || '').trim();
+  if (explicit) return explicit.replace(/\/+$/, '');
+  const first = (process.env.CORS_ORIGINS || '').split(',')[0]?.trim();
+  return first ? first.replace(/\/+$/, '') : null;
+}
+
+// FCM token error codes that mean the token will never work again — the
+// app was uninstalled, the browser revoked it, or it's malformed. Any other
+// error (network blip, quota) leaves the row alone for the next attempt.
+const DEAD_TOKEN_CODES = new Set([
+  'messaging/registration-token-not-registered',
+  'messaging/invalid-registration-token',
+  'messaging/invalid-argument'
+]);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 let messaging = null;
 let initTried = false;
+
+/**
+ * Initializes Firebase on server startup, so a missing/bad service account
+ * shows up immediately in the boot log instead of silently on the first
+ * order placed — potentially hours or days later. Never throws: push is
+ * optional (the app works without it), so a failure here only logs.
+ */
+export async function initPush() {
+  await ensureInit();
+  return messaging !== null;
+}
 
 async function ensureInit() {
   if (initTried) return messaging;
@@ -79,10 +111,16 @@ export async function sendToUser(userId, title, body, data = {}) {
       return;
     }
 
-    const user = await User.findByPk(userId);
-    const token = user?.deviceToken;
-    if (!token) {
-      console.warn(`[notify] skipped: user ${userId} has no deviceToken registered.`);
+    // Every signed-in device/browser for this user gets pushed to. Older
+    // accounts that haven't re-registered since this table was added fall
+    // back to the legacy single-token column so they don't go dark.
+    let tokens = (await DeviceToken.findAll({ where: { userId } })).map((row) => row.token);
+    if (tokens.length === 0) {
+      const user = await User.findByPk(userId);
+      if (user?.deviceToken) tokens = [user.deviceToken];
+    }
+    if (tokens.length === 0) {
+      console.warn(`[notify] skipped: user ${userId} has no device token registered.`);
       return;
     }
 
@@ -91,14 +129,31 @@ export async function sendToUser(userId, title, body, data = {}) {
       Object.entries(data).map(([k, v]) => [k, String(v)])
     );
 
-    const id = await msg.send({
-      token,
+    const link = webAppOrigin();
+    const response = await msg.sendEachForMulticast({
+      tokens,
       notification: { title, body },
       data: stringData,
+      // Each platform's FCM client applies only its own block below, so one
+      // message safely covers phones and browsers at once.
       android: { priority: 'high' },
       apns: { payload: { aps: { sound: 'default' } } },
+      webpush: {
+        notification: { icon: '/icons/Icon-192.png' },
+        ...(link ? { fcmOptions: { link } } : {})
+      }
     });
-    console.log(`[notify] sent to user ${userId}: "${title}" (messageId ${id})`);
+    console.log(`[notify] sent to user ${userId}: "${title}" (${response.successCount}/${tokens.length} delivered)`);
+
+    // A token FCM reports as permanently dead (uninstalled, revoked,
+    // malformed) is removed so future sends stop wasting a round trip on it.
+    const dead = response.responses
+      .map((r, i) => (!r.success && DEAD_TOKEN_CODES.has(r.error?.code) ? tokens[i] : null))
+      .filter(Boolean);
+    if (dead.length > 0) {
+      await DeviceToken.destroy({ where: { token: dead } });
+      console.log(`[notify] pruned ${dead.length} dead token(s) for user ${userId}`);
+    }
   } catch (error) {
     // A bad/expired token or transient FCM error must never break the request.
     console.warn('[notify] send failed:', error.code || '', error.message);

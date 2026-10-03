@@ -2,8 +2,9 @@ import { Router } from 'express';
 import { 
   getPendingUsers, 
   approveUser, 
-  getAdminAnalytics, 
-  createMerchantDirectly, 
+  getAdminAnalytics,
+  recordDashboardVisit,
+  createMerchantDirectly,
   createRiderDirectly,
   getMerchantsPaginated,
   getRidersPaginated,
@@ -18,6 +19,7 @@ import {
   revokeAccountSessions,
   getAccountImpact,
   deleteAccount,
+  removeUserApplication,
   getAuditLog
 } from './accountAdminController.js';
 
@@ -26,6 +28,7 @@ const adminRouter = Router();
 adminRouter.get('/admin/pending-users', authGuard, adminGuard, getPendingUsers);
 adminRouter.post('/admin/approve-user', authGuard, adminGuard, approveUser);
 adminRouter.get('/admin/analytics', authGuard, adminGuard, getAdminAnalytics);
+adminRouter.post('/admin/visit', authGuard, adminGuard, recordDashboardVisit);
 adminRouter.post('/admin/create-merchant', authGuard, adminGuard, createMerchantDirectly);
 adminRouter.post('/admin/create-rider', authGuard, adminGuard, createRiderDirectly);
 adminRouter.get('/admin/merchants', authGuard, adminGuard, getMerchantsPaginated);
@@ -42,6 +45,7 @@ adminRouter.get('/admin/users/:id/impact', authGuard, adminGuard, getAccountImpa
 adminRouter.post('/admin/users/:id/suspend', authGuard, adminGuard, adminActionLimiter, suspendAccount);
 adminRouter.post('/admin/users/:id/reactivate', authGuard, adminGuard, adminActionLimiter, reactivateAccount);
 adminRouter.post('/admin/users/:id/revoke-sessions', authGuard, adminGuard, adminActionLimiter, revokeAccountSessions);
+adminRouter.post('/admin/users/:id/applications/:mode/remove', authGuard, adminGuard, adminActionLimiter, removeUserApplication);
 adminRouter.delete('/admin/users/:id', authGuard, adminGuard, adminActionLimiter, deleteAccount);
 adminRouter.get('/admin/audit-log', authGuard, adminGuard, getAuditLog);
 

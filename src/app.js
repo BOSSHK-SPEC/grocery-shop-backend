@@ -21,6 +21,7 @@ import { CATEGORY_SEED } from './config/categories.js';
 import { storageRequestContext } from './storage/requestContext.js';
 import { verifyStorage } from './storage/imageStorage.js';
 import { BUSINESS_TYPE_SEED } from './config/businessTypes.js';
+import { initPush } from './utils/notify.js';
 
 // Initialize App
 const app = express();
@@ -77,6 +78,12 @@ verifyStorage()
     }
     console.warn(`[Storage] Image uploads will fail until this is fixed: ${err.message}`);
   });
+
+// Push is optional — orders place and fulfil fine without it (the app polls
+// as a fallback) — so unlike storage above, this never stops startup. It
+// still runs eagerly rather than on the first notification, so a missing or
+// bad service account shows up in the boot log now, not hours into production.
+initPush();
 
 // Database Connection and Sync
 // sync() creates any missing tables and never touches existing ones. That is

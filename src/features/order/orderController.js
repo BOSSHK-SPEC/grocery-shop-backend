@@ -2,12 +2,13 @@ import { z } from 'zod';
 import { Op } from 'sequelize';
 import { Business, Order, Address, User, sequelize } from '../../models/index.js';
 import { reserveStock, releaseStock, OutOfStockError } from './stock.js';
-import { resolveBusiness } from '../../utils/helpers.js';
+import { resolveBusiness, isAcceptingOrders } from '../../utils/helpers.js';
 import { sendToUser } from '../../utils/notify.js';
 import { notifyMerchant } from '../../utils/websocket.js';
 import { publishOrderChanged } from '../tracking/trackingService.js';
 import { verifyPaymentSignature, getRazorpay } from '../../config/razorpay.js';
 import { computeOrderTotals, toPaise, PricingError } from './pricing.js';
+import { createInvoiceForOrder } from '../invoice/invoiceController.js';
 import {
   ALL_STATUSES,
   OrderStatus,
@@ -153,6 +154,11 @@ export const createOrder = async (req, res, next) => {
     if (!business) {
       return res.status(404).json({ error: { message: 'Business not found' } });
     }
+    if (!isAcceptingOrders(business)) {
+      return res.status(409).json({
+        error: { message: 'This store is not accepting orders right now.', code: 'STORE_NOT_ACCEPTING_ORDERS' }
+      });
+    }
     // Money is NEVER read from the request. Any amount/price/total the client
     // sends (including per-item price/total) is dropped by this schema and the
     // whole bill is recomputed from DB prices in computeOrderTotals().
@@ -270,7 +276,7 @@ export const createOrder = async (req, res, next) => {
     try {
       newOrder = await sequelize.transaction(async (transaction) => {
         await reserveStock(totals.items, transaction, { allowShortfall: paymentStatus === 'PAID' });
-        return Order.create({
+        const order = await Order.create({
       businessId: business.id,
       customerId: req.user ? req.user.id : null,
       orderCode,
@@ -300,6 +306,20 @@ export const createOrder = async (req, res, next) => {
       noPlasticBag: data.noPlasticBag || false,
       deliveryInstructions: data.deliveryInstructions || null
         }, { transaction });
+
+        // The invoice is created in the same transaction as the order: either
+        // both exist or neither does, so an order is never left without the
+        // document that makes it visible to the customer in Account >
+        // Invoices (mirrors the walk-in-bill path in billingController.js).
+        await createInvoiceForOrder({
+          order,
+          business,
+          items: storedItems,
+          customerMobile: req.user ? req.user.mobileNumber : null,
+          transaction,
+        });
+
+        return order;
       });
     } catch (error) {
       if (error instanceof OutOfStockError) {
@@ -556,7 +576,10 @@ export const getGstInvoice = async (req, res, next) => {
     const order = await Order.findByPk(orderId, {
       include: [{ model: Business, as: 'Business' }]
     });
-    if (!order) {
+    // Not yours answers the same as not found, so an order id cannot be
+    // probed to read a stranger's invoice and delivery address — this
+    // endpoint only checks authGuard, not ownership, so it must check here.
+    if (!order || order.customerId !== req.user.id) {
       return res.status(404).json({ error: { message: 'Order not found' } });
     }
 
@@ -571,7 +594,10 @@ export const getGstInvoice = async (req, res, next) => {
       invoiceDate: order.createdAt || new Date().toISOString(),
       seller: {
         businessName: business?.businessName || 'GroZerry Store',
-        gstin: business?.gstNumber || '29AAAAA0000A1Z5',
+        // Never fabricate a GSTIN: a made-up one on a document labelled "tax
+        // invoice" is a legal liability, not a placeholder. Unregistered
+        // sellers show this instead — same wording the new invoice PDF uses.
+        gstin: business?.gstNumber || 'Not registered',
         storePhone: business?.storePhone || 'Support',
       },
       buyer: {

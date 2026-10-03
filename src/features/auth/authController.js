@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { z } from 'zod';
-import { User, Otp, Address, Tenant } from '../../models/index.js';
+import { User, Otp, Address, Tenant, DeviceToken } from '../../models/index.js';
 import { discardImages, presentUserMisc, resolveImageInput } from '../../storage/imageStorage.js';
 import { ModeStatus, legacyFieldsForApplication, modesOf, withModeStatus } from '../../utils/modes.js';
 import { signAccessToken, issueRefreshToken, rotateRefreshToken, revokeRefreshToken } from '../../utils/tokens.js';
@@ -589,11 +589,18 @@ export const onboardDelivery = async (req, res, next) => {
       vehicleType: z.enum(['motorbike', 'scooter', 'electric_scooter', 'bicycle']).default('motorbike'),
       bikeRegNumber: z.string().trim().optional().nullable(),
       dlPic: z.string().optional().nullable(),
+      // Optional, not required: an older app build may not send these yet,
+      // and a submission must keep working while that build is still out there.
+      dlPicBack: z.string().optional().nullable(),
+      selfie: z.string().optional().nullable(),
+      rcPhoto: z.string().optional().nullable(),
       tenantId: z.string().optional().nullable(),
       address: addressSchema
     });
 
-    const { firstName, lastName, vehicleType, bikeRegNumber, dlPic, tenantId, address: addressData } = schema.parse(req.body);
+    const {
+      firstName, lastName, vehicleType, bikeRegNumber, dlPic, dlPicBack, selfie, rcPhoto, tenantId, address: addressData
+    } = schema.parse(req.body);
     const user = req.user;
     const motorised = vehicleType !== 'bicycle';
     if (motorised && !bikeRegNumber) {
@@ -627,24 +634,39 @@ export const onboardDelivery = async (req, res, next) => {
       user.tenantId = requestedTenant;
     }
 
-    const previousDlPic = user.misc?.dlPic || null;
-    const dlPicUrl = dlPic
-      ? await resolveImageInput(dlPic, {
-          purpose: 'driving_licence',
-          userId: user.id,
-          current: previousDlPic,
-        })
-      : null;
-    const dlChanged = Boolean(dlPicUrl) && dlPicUrl !== previousDlPic;
+    // Resolves one rider document against whatever is already on file. Keeps
+    // the previous value when nothing new is sent, so re-saving a profile
+    // that already has a document keeps working without re-uploading — the
+    // app omits a field once it's unchanged.
+    const resolveRiderDoc = async (input, purpose, previous) => {
+      if (!input) return { value: previous, changed: false, previous };
+      const next = await resolveImageInput(input, { purpose, userId: user.id, current: previous });
+      return { value: next || previous, changed: Boolean(next) && next !== previous, previous };
+    };
+
+    const priorMisc = user.misc || {};
+    let dl, dlBack, selfieDoc, rc;
+    try {
+      dl = await resolveRiderDoc(dlPic, 'driving_licence', priorMisc.dlPic || null);
+      dlBack = await resolveRiderDoc(dlPicBack, 'driving_licence', priorMisc.dlPicBack || null);
+      selfieDoc = await resolveRiderDoc(selfie, 'rider_selfie', priorMisc.selfie || null);
+      rc = await resolveRiderDoc(motorised ? rcPhoto : null, 'vehicle_rc', priorMisc.rcPhoto || null);
+    } catch (error) {
+      await discardImages([dl, dlBack, selfieDoc, rc].filter((d) => d?.changed).map((d) => d.value));
+      throw error;
+    }
 
     // A rider must end up with a licence on file. Checked against the merged
-    // result rather than the request body, so re-saving a profile that already
-    // has one keeps working without re-uploading — the app omits dlPic when it
-    // is unchanged. Enforced here and not only in the app: this is a compliance
-    // record, and a client-side check alone is something a modified client can
-    // simply skip.
-    const finalDlPic = dlPicUrl || user.misc?.dlPic || '';
+    // result rather than the request body, so it holds regardless of what the
+    // client did or didn't resend. Enforced here and not only in the app:
+    // this is a compliance record, and a client-side check alone is
+    // something a modified client can simply skip.
+    const finalDlPic = dl.value || '';
     if (motorised && !finalDlPic) {
+      // The other three documents may have uploaded successfully even though
+      // this check fails — without this they'd be orphaned in storage,
+      // never attached to the user and never cleaned up.
+      await discardImages([dl, dlBack, selfieDoc, rc].filter((d) => d.changed).map((d) => d.value));
       return res.status(400).json({
         error: {
           message: 'A driving licence photo is required to register as a delivery partner.',
@@ -654,19 +676,28 @@ export const onboardDelivery = async (req, res, next) => {
     }
 
     user.misc = withModeStatus(
-      { ...user.misc, bikeRegNumber: motorised ? bikeRegNumber : null, dlPic: finalDlPic || null },
+      {
+        ...user.misc,
+        bikeRegNumber: motorised ? bikeRegNumber : null,
+        dlPic: finalDlPic || null,
+        dlPicBack: dlBack.value || null,
+        selfie: selfieDoc.value || null,
+        rcPhoto: motorised ? (rc.value || null) : null,
+      },
       'delivering',
       ModeStatus.PENDING,
       { vehicleType }
     );
 
+    const docs = [dl, dlBack, selfieDoc, rc];
     try {
       await user.save();
     } catch (error) {
-      if (dlChanged) await discardImages(dlPicUrl);
+      await discardImages(docs.filter((d) => d.changed).map((d) => d.value));
       throw error;
     }
-    if (dlChanged) await discardImages(previousDlPic);
+    // Save succeeded: whatever each changed document replaced is now orphaned.
+    await discardImages(docs.filter((d) => d.changed).map((d) => d.previous));
 
     let address = await Address.findOne({ where: { userId: user.id } });
     if (address) {
@@ -697,13 +728,57 @@ export const onboardDelivery = async (req, res, next) => {
   }
 };
 
-/** Registers/refreshes the caller's FCM device token for push notifications. */
+/**
+ * Registers/refreshes the caller's FCM device token for push notifications.
+ * A user can hold several tokens at once (phone app + a browser tab, or two
+ * browsers) — each is its own row, keyed by the token itself, so the same
+ * device re-registering (token refresh, relaunch) updates in place instead
+ * of duplicating.
+ */
 export const registerDeviceToken = async (req, res, next) => {
+  try {
+    const schema = z.object({
+      deviceToken: z.string().min(1),
+      // Lets notify.sendToUser() pick the right FCM payload shape
+      // (webpush click link vs android/apns). Older clients omit it.
+      platform: z.enum(['android', 'ios', 'web']).optional()
+    });
+    const { deviceToken, platform } = schema.parse(req.body);
+
+    // Kept for any code still reading the single-token column; real sends
+    // go through the DeviceToken table below, which supports multiple
+    // devices per account.
+    req.user.deviceToken = deviceToken;
+    await req.user.save();
+
+    await DeviceToken.upsert({
+      token: deviceToken,
+      userId: req.user.id,
+      platform: platform || 'unknown',
+      lastSeenAt: new Date()
+    });
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Removes this device's token on sign-out, so a device that just logged out
+ * stops receiving pushes for the account it signed out of. Only this one
+ * token is removed — other devices signed in to the same account keep
+ * getting notified.
+ */
+export const unregisterDeviceToken = async (req, res, next) => {
   try {
     const schema = z.object({ deviceToken: z.string().min(1) });
     const { deviceToken } = schema.parse(req.body);
-    req.user.deviceToken = deviceToken;
-    await req.user.save();
+    await DeviceToken.destroy({ where: { token: deviceToken, userId: req.user.id } });
+    if (req.user.deviceToken === deviceToken) {
+      req.user.deviceToken = null;
+      await req.user.save();
+    }
     return res.status(200).json({ success: true });
   } catch (error) {
     next(error);

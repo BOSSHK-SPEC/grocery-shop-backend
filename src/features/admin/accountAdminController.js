@@ -9,8 +9,10 @@ import {
   revokeUserSessions,
   describeUserImpact,
   hardDeleteUser,
+  removeApplication,
   cascadeTenant
 } from '../../utils/accountLifecycle.js';
+import { REVIEWABLE_MODES } from '../../utils/modes.js';
 
 const idParam = z.string().uuid('Invalid account id.');
 const reasonField = z.string().trim().max(500).optional();
@@ -128,6 +130,48 @@ export const revokeAccountSessions = async (req, res, next) => {
     return res.status(200).json({
       message: 'Signed out of all devices. The account can sign in again.',
       user: { id: target.id, status: target.status }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /admin/users/:id/applications/:mode/remove
+ *
+ * The scoped alternative to a full delete: closes the one application
+ * (seller or rider) a Partner Directory row represents, without touching the
+ * account itself. See `removeApplication` in accountLifecycle.js for exactly
+ * what is and isn't affected.
+ */
+export const removeUserApplication = async (req, res, next) => {
+  try {
+    const target = await loadTarget(req, res);
+    if (!target) return;
+
+    const parsedMode = z.enum(REVIEWABLE_MODES).safeParse(req.params.mode);
+    if (!parsedMode.success) {
+      return res.status(400).json({ error: { message: 'Unknown application.', code: 'INVALID_MODE' } });
+    }
+    const mode = parsedMode.data;
+    const { reason } = z.object({ reason: reasonField }).parse(req.body ?? {});
+
+    const before = { role: target.role, status: target.status };
+    const result = await removeApplication(target, mode);
+
+    await recordAudit(req, {
+      action: mode === 'selling' ? 'REMOVE_SELLER_STATUS' : 'REMOVE_RIDER_STATUS',
+      targetType: 'USER',
+      targetId: target.id,
+      targetSnapshot: { before, after: { role: target.role, status: target.status }, ...result },
+      reason
+    });
+
+    return res.status(200).json({
+      message: mode === 'selling'
+        ? `Seller status removed${result.businessesClosed ? ` — ${result.businessesClosed} store(s) closed` : ''}. The account can still shop.`
+        : 'Delivery partner status removed. The account can still shop.',
+      user: { id: target.id, role: target.role, status: target.status }
     });
   } catch (error) {
     next(error);
