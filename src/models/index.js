@@ -22,6 +22,7 @@ import { AuditLog } from './AuditLog.js';
 import { UploadIntent } from './UploadIntent.js';
 import { DeviceToken } from './DeviceToken.js';
 import { DashboardVisit } from './DashboardVisit.js';
+import { SiteVisit } from './SiteVisit.js';
 
 // Setup Relationships
 
@@ -146,5 +147,6 @@ export {
   AuditLog,
   UploadIntent,
   DeviceToken,
-  DashboardVisit
+  DashboardVisit,
+  SiteVisit
 };
