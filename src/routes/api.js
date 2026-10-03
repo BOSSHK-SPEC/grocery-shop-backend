@@ -15,6 +15,7 @@ import adminRouter from '../features/admin/adminRoutes.js';
 import superAdminRouter from '../features/superAdmin/superAdminRoutes.js';
 import { mediaRouter } from '../features/media/mediaRoutes.js';
 import { trackingRouter } from '../features/tracking/trackingRoutes.js';
+import { publicRouter } from '../features/public/publicRoutes.js';
 
 export const apiRouter = Router();
 
@@ -34,4 +35,5 @@ apiRouter.use(paymentRouter);
 apiRouter.use(adminRouter);
 apiRouter.use(superAdminRouter);
 apiRouter.use(mediaRouter);
+apiRouter.use(publicRouter);
 

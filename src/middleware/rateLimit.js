@@ -112,3 +112,15 @@ export const uploadRequestLimiter = rateLimit({
     }
   }
 });
+
+// Public marketing-site visit ping (no auth — anyone can load the landing
+// page). It is idempotent on the server (one row per IP per day, so it can
+// never inflate the count), but still rate limited so a scripted flood
+// cannot hammer the database with pointless writes from a single source.
+export const siteVisitLimiter = rateLimit({
+  windowMs: intEnv('SITE_VISIT_RATE_WINDOW_MIN', 5) * 60 * 1000,
+  limit: intEnv('SITE_VISIT_RATE_MAX', 20),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: { message: 'Too many requests.' } }
+});
